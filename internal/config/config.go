@@ -25,6 +25,15 @@ type Config struct {
 	Ticker   TickerConfig   `yaml:"ticker"`
 	Server   ServerConfig   `yaml:"server"`
 	Holidays []string       `yaml:"holidays"` // YYYY-MM-DD, NSE trading holidays
+	Dev      DevConfig      `yaml:"dev"`
+}
+
+// DevConfig points the engine at a Kite simulator (tools/kitemock) for
+// end-to-end rehearsals. Leave empty in real use. Refused in live mode.
+type DevConfig struct {
+	APIRoot   string `yaml:"api_root"`   // e.g. http://127.0.0.1:9000  (default https://api.kite.trade)
+	LoginRoot string `yaml:"login_root"` // e.g. http://127.0.0.1:9000  (default https://kite.zerodha.com)
+	TickerURL string `yaml:"ticker_url"` // e.g. ws://127.0.0.1:9000/ws (default wss://ws.kite.trade)
 }
 
 // KiteConfig holds API credentials. The secret may come from the environment.
@@ -258,6 +267,9 @@ func (c Config) Validate() error {
 		}
 	} else if c.Mode == "live" {
 		add("network.bind_ip is required in live mode (SEBI static-IP whitelisting)")
+	}
+	if c.Mode == "live" && (c.Dev.APIRoot != "" || c.Dev.LoginRoot != "" || c.Dev.TickerURL != "") {
+		add("dev.* overrides are not allowed in live mode")
 	}
 	if c.Orders.MaxOPS < 1 || c.Orders.MaxOPS >= 10 {
 		add("orders.max_ops must be 1..9 (SEBI registration threshold is 10 OPS), got %d", c.Orders.MaxOPS)

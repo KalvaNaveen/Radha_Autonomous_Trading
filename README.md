@@ -101,6 +101,51 @@ have to sit at +0.40%, which is the current price, so it would trigger at once.
 
 ---
 
+## Rehearsal: the full flow against a simulated Kite (no market, no money)
+
+`tools/kitemock` pretends to be Kite: the login redirect, the session exchange (it
+verifies the SHA-256 checksum), profile, margins, the instrument master,
+historical minute candles, and a binary KiteTicker WebSocket. It plays a scripted
+~19-minute session with 1-minute candles:
+
+- **RADHAUP:** a long setup.
+- **RADHADN:** a short setup.
+- **RADHAFLAT:** must never trade.
+- **NOTAREALSTOCK:** must be skipped.
+
+Run it on a weekday (the engine skips weekends):
+
+```bash
+make build
+go run ./tools/kitemock -setup rehearsal     # writes rehearsal/config.yaml + today's watchlist, starts the mock
+./bin/engine -config rehearsal/config.yaml   # second terminal
+# open http://127.0.0.1:8080/login in your browser, then watch http://127.0.0.1:8080/status
+```
+
+Expected output, from a real run:
+
+```
+00:16:57 Kite session established            user=RK1234
+00:16:57 watchlist  NOTAREALSTOCK: not an NSE EQ instrument — skipped
+00:16:59 session prepared                    agents=3 indices=2 radar=permissive
+00:16:59 ticker connected                    instruments=5
+00:21:44 ENTRY signal  RADHAUP  LONG  qty=497  "cross+pullback, close 100.50 vwap 100.00 rvol 3.01"
+00:21:44 ENTRY signal  RADHADN  SHORT qty=502
+00:21:44 FILLED / stop live                  RADHAUP trigger=100.10, RADHADN trigger=99.90
+00:23:39 lock stage BREAKEVEN                stop → 100.75 / 99.25
+00:25:01 lock stage PROFIT_LOCK              stop → 101.00 / 99.00
+00:30:44 – 00:31:44 trailing                 stop → 101.15 / 98.85
+00:32:37 trade closed  RADHAUP net ₹178.14   stop hit (PROFIT_LOCK @ 101.15)
+00:32:37 trade closed  RADHADN net ₹181.51   stop hit (PROFIT_LOCK @ 98.85)
+00:34:44 SQUARE-OFF: kill switch → all agents HALTED
+00:35:14 sweep complete                      (broker flat, no live orders)
+00:36:15 session closed                      trades=2 realized=359.65 orders=11, 0 errors
+```
+
+The `dev:` overrides that point the engine at the mock are rejected when `mode: live` is set.
+
+---
+
 ## Architecture
 
 ```

@@ -4,3 +4,4 @@ journal/
 logs/
 config.yaml
 *.env
+rehearsal/

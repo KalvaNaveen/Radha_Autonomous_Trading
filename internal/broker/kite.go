@@ -19,8 +19,11 @@ type Kite struct {
 }
 
 // NewKite builds a Kite client whose REST traffic originates from the static IP.
-func NewKite(apiKey, accessToken string, httpClient *http.Client, marketProtection float64) *Kite {
+func NewKite(apiKey, accessToken string, httpClient *http.Client, marketProtection float64, apiRoot string) *Kite {
 	c := kiteconnect.New(apiKey)
+	if apiRoot != "" {
+		c.SetBaseURI(apiRoot)
+	}
 	if httpClient != nil {
 		c.SetHTTPClient(httpClient)
 	}

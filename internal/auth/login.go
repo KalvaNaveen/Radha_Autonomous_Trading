@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,7 +61,12 @@ type Manager struct {
 	changed chan struct{}
 
 	statusFn func() any
+
+	apiRoot, loginRoot string // dev overrides (simulator)
 }
+
+// SetRoots points the login flow at a simulator (dev only).
+func (m *Manager) SetRoots(apiRoot, loginRoot string) { m.apiRoot, m.loginRoot = apiRoot, loginRoot }
 
 // NewManager creates a token manager persisting to dataDir/kite_token.json.
 func NewManager(apiKey, apiSecret, dataDir, publicURL string, httpc *http.Client, clk clock.Clock, log *slog.Logger) *Manager {
@@ -145,7 +151,11 @@ func (m *Manager) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
 		c := kiteconnect.New(m.apiKey)
-		http.Redirect(w, r, c.GetLoginURL(), http.StatusFound)
+		u := c.GetLoginURL()
+		if m.loginRoot != "" {
+			u = strings.Replace(u, "https://kite.zerodha.com", m.loginRoot, 1)
+		}
+		http.Redirect(w, r, u, http.StatusFound)
 	})
 	mux.HandleFunc("GET /kite/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -154,6 +164,9 @@ func (m *Manager) Handler() http.Handler {
 			return
 		}
 		c := kiteconnect.New(m.apiKey)
+		if m.apiRoot != "" {
+			c.SetBaseURI(m.apiRoot)
+		}
 		if m.httpc != nil {
 			c.SetHTTPClient(m.httpc)
 		}

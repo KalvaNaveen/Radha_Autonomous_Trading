@@ -416,3 +416,11 @@ type AgentSnapshot struct {
 	LastSignal    string    `json:"last_signal,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
+
+// MarshalText makes enums render as names in JSON logs and the status endpoint.
+func (s Side) MarshalText() ([]byte, error)         { return []byte(s.String()), nil }
+func (s AgentState) MarshalText() ([]byte, error)   { return []byte(s.String()), nil }
+func (l LockStage) MarshalText() ([]byte, error)    { return []byte(l.String()), nil }
+func (p Priority) MarshalText() ([]byte, error)     { return []byte(p.String()), nil }
+func (p OrderPurpose) MarshalText() ([]byte, error) { return []byte(p.String()), nil }
+func (a OrderAction) MarshalText() ([]byte, error)  { return []byte(a.String()), nil }

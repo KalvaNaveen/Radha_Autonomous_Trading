@@ -57,6 +57,7 @@ func New(cfg config.Config, log *slog.Logger) (*Engine, error) {
 	}
 	clk := clock.System{}
 	am := auth.NewManager(cfg.Kite.APIKey, cfg.Kite.APISecret, cfg.Paths.DataDir, cfg.Server.PublicURL, httpc, clk, log.With("component", "auth"))
+	am.SetRoots(cfg.Dev.APIRoot, cfg.Dev.LoginRoot)
 	if cfg.Kite.AccessToken != "" {
 		am.Pin(cfg.Kite.AccessToken)
 	}
@@ -179,7 +180,7 @@ func (e *Engine) runDay(parent context.Context, day time.Time) error {
 		if err != nil {
 			return fmt.Errorf("no Kite login before square-off: %w", err)
 		}
-		kite = broker.NewKite(e.cfg.Kite.APIKey, tok.AccessToken, e.httpc, e.cfg.Orders.MarketProtection)
+		kite = broker.NewKite(e.cfg.Kite.APIKey, tok.AccessToken, e.httpc, e.cfg.Orders.MarketProtection, e.cfg.Dev.APIRoot)
 		prof, err := kite.Client().GetUserProfile()
 		if err == nil {
 			log.Info("kite session valid", "user", prof.UserID)
@@ -335,7 +336,9 @@ func (d *dayRun) run(parent context.Context, kite *broker.Kite, rd *radar.Radar)
 	}
 	tok, _ := e.auth.Current()
 	start(func() { d.om.Run(dayCtx) })
-	start(func() { d.mux.Run(dayCtx, e.cfg.Kite.APIKey, tok.AccessToken, e.cfg.Ticker.ReconnectMaxDelay) })
+	start(func() {
+		d.mux.Run(dayCtx, e.cfg.Kite.APIKey, tok.AccessToken, e.cfg.Dev.TickerURL, e.cfg.Ticker.ReconnectMaxDelay)
+	})
 	start(func() {
 		ordermanager.NewReconciler(d.trader, d.router, e.cfg.Orders.ReconcileInterval, d.log).Run(dayCtx)
 	})

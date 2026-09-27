@@ -5,6 +5,7 @@ package ticker
 import (
 	"context"
 	"log/slog"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,8 +179,15 @@ func Convert(k kitemodels.Tick, received time.Time) models.Tick {
 // Run connects the KiteTicker WebSocket and blocks until ctx is done.
 // The SDK auto-reconnects with exponential backoff; on every (re)connect we
 // resubscribe everything in full mode.
-func (m *Multiplexer) Run(ctx context.Context, apiKey, accessToken string, maxDelay time.Duration) {
+func (m *Multiplexer) Run(ctx context.Context, apiKey, accessToken, rootURL string, maxDelay time.Duration) {
 	kt := kiteticker.New(apiKey, accessToken)
+	if rootURL != "" {
+		if u, err := url.Parse(rootURL); err == nil {
+			kt.SetRootURL(*u)
+		} else {
+			m.log.Error("bad ticker url", "url", rootURL, "err", err)
+		}
+	}
 	kt.SetAutoReconnect(true)
 	if maxDelay > 0 {
 		_ = kt.SetReconnectMaxDelay(maxDelay)
