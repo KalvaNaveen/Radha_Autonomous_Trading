@@ -41,8 +41,110 @@ type Engine struct {
 	auth  *auth.Manager
 	httpc *http.Client
 
-	mu     sync.RWMutex
-	status func() any
+	mu          sync.RWMutex
+	status      func() any
+	stage       string
+	stageDetail string
+	stageAt     time.Time
+	lastErr     string
+	activeDay   string
+	retry       chan struct{}
+}
+
+// State is the engine lifecycle snapshot shown in the UI.
+type State struct {
+	Stage       string    `json:"stage"`
+	Detail      string    `json:"detail"`
+	Since       time.Time `json:"since"`
+	LastError   string    `json:"last_error,omitempty"`
+	Day         string    `json:"day,omitempty"`
+	NextSession time.Time `json:"next_session"`
+	TargetDay   string    `json:"target_day"`
+	Session     any       `json:"session,omitempty"`
+}
+
+func (e *Engine) setStage(stage, detail string) {
+	e.mu.Lock()
+	e.stage, e.stageDetail, e.stageAt = stage, detail, e.clk.Now()
+	e.mu.Unlock()
+}
+
+func (e *Engine) setErr(err error) {
+	e.mu.Lock()
+	if err == nil {
+		e.lastErr = ""
+	} else {
+		e.lastErr = err.Error()
+	}
+	e.mu.Unlock()
+}
+
+// State returns a snapshot for the UI.
+func (e *Engine) State() State {
+	e.mu.RLock()
+	st := State{Stage: e.stage, Detail: e.stageDetail, Since: e.stageAt, LastError: e.lastErr, Day: e.activeDay,
+		NextSession: e.nextSessionStart(), TargetDay: e.TargetDay().Format("2006-01-02")}
+	f := e.status
+	e.mu.RUnlock()
+	if f != nil {
+		st.Session = f()
+	}
+	return st
+}
+
+// TargetDay is the trading day the next watchlist is for: today until the
+// square-off, otherwise the next trading day.
+func (e *Engine) TargetDay() time.Time {
+	now := e.clk.Now()
+	if e.sess.IsTradingDay(now) && now.Before(e.sess.At(now, e.sess.SquareOff)) {
+		return clock.Midnight(now)
+	}
+	return e.sess.NextTradingDay(now)
+}
+
+// Auth exposes the login manager (for the web UI).
+func (e *Engine) Auth() *auth.Manager { return e.auth }
+
+// Config returns the engine configuration.
+func (e *Engine) Config() config.Config { return e.cfg }
+
+// Session returns the trading calendar.
+func (e *Engine) Session() *clock.Session { return e.sess }
+
+// WatchlistChanged wakes a session that is waiting for today's watchlist.
+func (e *Engine) WatchlistChanged() {
+	e.mu.RLock()
+	waiting := e.stage == "waiting_watchlist" || e.stage == "aborted"
+	e.mu.RUnlock()
+	if waiting {
+		e.Retry()
+	}
+}
+
+// Retry wakes the engine if it is sleeping after an aborted day, so today's
+// session is attempted again (e.g. after fixing credentials or the watchlist).
+func (e *Engine) Retry() {
+	select {
+	case e.retry <- struct{}{}:
+	default:
+	}
+}
+
+func (e *Engine) sleepOrRetry(ctx context.Context, t time.Time) (retried bool, err error) {
+	d := time.Until(t)
+	if d <= 0 {
+		return false, ctx.Err()
+	}
+	tm := time.NewTimer(d)
+	defer tm.Stop()
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-tm.C:
+		return false, nil
+	case <-e.retry:
+		return true, nil
+	}
 }
 
 // New wires the daemon.
@@ -61,7 +163,8 @@ func New(cfg config.Config, log *slog.Logger) (*Engine, error) {
 	if cfg.Kite.AccessToken != "" {
 		am.Pin(cfg.Kite.AccessToken)
 	}
-	e := &Engine{cfg: cfg, log: log, clk: clk, sess: sess, auth: am, httpc: httpc}
+	e := &Engine{cfg: cfg, log: log, clk: clk, sess: sess, auth: am, httpc: httpc, retry: make(chan struct{}, 1),
+		stage: "starting", stageAt: clk.Now()}
 	am.SetStatusProvider(func() any {
 		e.mu.RLock()
 		f := e.status
@@ -105,45 +208,49 @@ func sleepUntil(ctx context.Context, t time.Time) error {
 
 // Run loops over trading days until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context) error {
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- e.auth.Serve(ctx, e.cfg.Server.Listen) }()
-	e.log.Info("engine up", "mode", e.cfg.Mode, "http", e.cfg.Server.Listen, "login_url", e.auth.LoginURL(),
-		"bind_ip", e.cfg.Network.BindIP)
+	e.log.Info("engine up", "mode", e.cfg.Mode, "ui", e.cfg.Server.PublicURL, "bind_ip", e.cfg.Network.BindIP)
 
 	for {
-		select {
-		case err := <-srvErr:
-			if err != nil {
-				return fmt.Errorf("http server: %w", err)
-			}
-		default:
-		}
 		now := e.clk.Now()
 		if !e.sess.IsTradingDay(now) || !now.Before(e.sess.At(now, e.sess.SessionEnd)) {
 			next := e.nextSessionStart()
+			e.setStage("sleeping", "Market closed. Next session prepares at "+next.Format("Mon 02 Jan 15:04"))
 			e.log.Info("sleeping until next session", "wake", next.Format(time.RFC1123))
-			if err := sleepUntil(ctx, next); err != nil {
+			if _, err := e.sleepOrRetry(ctx, next); err != nil {
 				return nil
 			}
 			continue
 		}
 		if prep := e.sess.At(now, e.sess.PrepareAt); now.Before(prep) {
+			e.setStage("waiting_prepare", "Preparation starts at "+prep.Format("15:04")+". You can log in to Kite any time after 06:00.")
 			e.log.Info("waiting for preparation time", "at", prep.Format("15:04:05"))
-			if err := sleepUntil(ctx, prep); err != nil {
+			if _, err := e.sleepOrRetry(ctx, prep); err != nil {
 				return nil
 			}
 		}
 		day := clock.Midnight(e.clk.Now())
+		e.mu.Lock()
+		e.activeDay = day.Format("2006-01-02")
+		e.mu.Unlock()
+		e.setErr(nil)
 		err := e.runDay(ctx, day)
 		if ctx.Err() != nil {
 			return nil
 		}
 		if err != nil {
+			e.setErr(err)
+			e.setStage("aborted", "Today's session stopped: fix the problem shown and press Retry.")
 			e.log.Error("trading day aborted", "day", day.Format("2006-01-02"), "err", err)
+		} else {
+			e.setStage("closed", "Session finished. Journal written.")
 		}
-		// Never re-run the same day: sleep past its end.
-		if err := sleepUntil(ctx, e.sess.At(day, e.sess.SessionEnd)); err != nil {
+		// Don't re-run a finished day; an aborted one can be retried from the UI.
+		retried, serr := e.sleepOrRetry(ctx, e.sess.At(day, e.sess.SessionEnd))
+		if serr != nil {
 			return nil
+		}
+		if retried {
+			e.log.Info("retry requested from UI")
 		}
 	}
 }
@@ -171,7 +278,12 @@ func (e *Engine) runDay(parent context.Context, day time.Time) error {
 	log := e.log.With("day", day.Format("2006-01-02"))
 
 	var err error
+	select { // discard a stale retry request
+	case <-e.retry:
+	default:
+	}
 	// 1. Today's Kite session (one browser login per day).
+	e.setStage("waiting_login", "Log in to Kite to start today's session.")
 	loginCtx, cancelLogin := context.WithDeadline(parent, e.sess.At(day, e.sess.SquareOff))
 	defer cancelLogin()
 	var kite *broker.Kite
@@ -180,7 +292,7 @@ func (e *Engine) runDay(parent context.Context, day time.Time) error {
 		if err != nil {
 			return fmt.Errorf("no Kite login before square-off: %w", err)
 		}
-		kite = broker.NewKite(e.cfg.Kite.APIKey, tok.AccessToken, e.httpc, e.cfg.Orders.MarketProtection, e.cfg.Dev.APIRoot)
+		kite = broker.NewKite(e.auth.APIKey(), tok.AccessToken, e.httpc, e.cfg.Orders.MarketProtection, e.cfg.Dev.APIRoot)
 		prof, err := kite.Client().GetUserProfile()
 		if err == nil {
 			log.Info("kite session valid", "user", prof.UserID)
@@ -188,6 +300,7 @@ func (e *Engine) runDay(parent context.Context, day time.Time) error {
 		}
 		var ke kiteconnect.Error
 		if errors.As(err, &ke) && ke.ErrorType == kiteconnect.TokenError {
+			e.setStage("waiting_login", "The saved Kite token was rejected — log in again.")
 			log.Warn("stored token rejected — login again", "err", err)
 			e.auth.Invalidate()
 			continue
@@ -196,6 +309,7 @@ func (e *Engine) runDay(parent context.Context, day time.Time) error {
 	}
 
 	// 2. Watchlist (dropped the previous evening).
+	e.setStage("loading_watchlist", "Reading today's watchlist.")
 	//    If it is missing, keep checking every minute until the entry cutoff so
 	//    a late drop still trades the rest of the day.
 	var entries []watchlist.Entry
@@ -211,8 +325,9 @@ func (e *Engine) runDay(parent context.Context, day time.Time) error {
 		if !errors.Is(err, watchlist.ErrNoWatchlist) || !e.clk.Now().Before(e.sess.At(day, e.sess.EntryCutoff)) {
 			return err
 		}
+		e.setStage("waiting_watchlist", "No watchlist for today yet — add symbols in the Watchlist panel.")
 		log.Error("no watchlist for today yet — retrying every minute", "expected", watchlist.PathFor(e.cfg.Paths.WatchlistDir, day))
-		if err := sleepUntil(parent, e.clk.Now().Add(time.Minute)); err != nil {
+		if _, err := e.sleepOrRetry(parent, e.clk.Now().Add(time.Minute)); err != nil {
 			return err
 		}
 	}
@@ -220,6 +335,7 @@ func (e *Engine) runDay(parent context.Context, day time.Time) error {
 	// 3. Instruments + resolution.
 	prepCtx, cancelPrep := context.WithTimeout(parent, 10*time.Minute)
 	defer cancelPrep()
+	e.setStage("loading_instruments", "Downloading the NSE instrument list.")
 	nse, err := e.instruments(prepCtx, kite, day)
 	if err != nil {
 		return fmt.Errorf("instruments: %w", err)
@@ -253,6 +369,7 @@ func (e *Engine) runDay(parent context.Context, day time.Time) error {
 	for t := range indexSet {
 		histTokens = append(histTokens, t)
 	}
+	e.setStage("loading_history", fmt.Sprintf("Loading 10-day history for %d instruments.", len(histTokens)))
 	log.Info("loading history", "instruments", len(histTokens))
 	hist, err := history.NewLoader(kite, e.cfg.Paths.DataDir, e.cfg.Strategy.RVOLLookbackDays, log).
 		Load(prepCtx, day, histTokens, e.cfg.Strategy.CandleInterval)
@@ -337,7 +454,7 @@ func (d *dayRun) run(parent context.Context, kite *broker.Kite, rd *radar.Radar)
 	tok, _ := e.auth.Current()
 	start(func() { d.om.Run(dayCtx) })
 	start(func() {
-		d.mux.Run(dayCtx, e.cfg.Kite.APIKey, tok.AccessToken, e.cfg.Dev.TickerURL, e.cfg.Ticker.ReconnectMaxDelay)
+		d.mux.Run(dayCtx, e.auth.APIKey(), tok.AccessToken, e.cfg.Dev.TickerURL, e.cfg.Ticker.ReconnectMaxDelay)
 	})
 	start(func() {
 		ordermanager.NewReconciler(d.trader, d.router, e.cfg.Orders.ReconcileInterval, d.log).Run(dayCtx)
@@ -352,6 +469,7 @@ func (d *dayRun) run(parent context.Context, kite *broker.Kite, rd *radar.Radar)
 	}
 	e.setStatus(d.statusFn)
 	defer e.setStatus(nil)
+	e.setStage("running", fmt.Sprintf("Session live with %d agents.", len(d.agents)))
 
 	squareOff := e.sess.At(d.day, e.sess.SquareOff)
 	sweepAt := e.sess.At(d.day, e.sess.SafetySweep)

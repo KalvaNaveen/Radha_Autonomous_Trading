@@ -1,18 +1,25 @@
-// Command engine runs the intraday trading daemon.
+// Command engine runs the intraday trading daemon and its local control panel.
 //
-//	engine -config config.yaml           run (normally under systemd)
-//	engine -config config.yaml -check    validate config + watchlist, then exit
+//	engine                                 run with ./config.yaml (created on first run)
+//	engine -config path/to/config.yaml     run with a specific config
+//	engine -check                          validate config + next watchlist, then exit
+//
+// Open http://127.0.0.1:8080 for the control panel (it opens automatically).
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -20,14 +27,16 @@ import (
 	"github.com/nkalva/kitealgo/internal/config"
 	"github.com/nkalva/kitealgo/internal/engine"
 	"github.com/nkalva/kitealgo/internal/watchlist"
+	"github.com/nkalva/kitealgo/internal/web"
 )
 
 var version = "dev"
 
 func main() {
-	cfgPath := flag.String("config", "config.yaml", "path to config file")
+	cfgPath := flag.String("config", "config.yaml", "path to config file (created with paper-mode defaults if missing)")
 	check := flag.Bool("check", false, "validate config and the next watchlist, then exit")
 	debug := flag.Bool("debug", false, "debug logging")
+	noBrowser := flag.Bool("no-browser", false, "do not open the control panel in a browser")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
 
@@ -36,16 +45,22 @@ func main() {
 		return
 	}
 
+	created, err := config.WriteDefault(*cfgPath)
+	if err != nil {
+		fatal("cannot create default config: %v", err)
+	}
+	if created {
+		fmt.Printf("Created %s with paper-mode defaults.\n", *cfgPath)
+	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:\n"+err.Error())
-		os.Exit(2)
+		fatal("config error in %s:\n%v", *cfgPath, err)
 	}
 
-	log, closeLog, err := newLogger(cfg.Paths.LogFile, *debug)
+	ring := web.NewLogRing(2000)
+	log, closeLog, err := newLogger(cfg.Paths.LogFile, *debug, ring)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "log setup:", err)
-		os.Exit(2)
+		fatal("log setup: %v", err)
 	}
 	defer closeLog()
 
@@ -55,38 +70,88 @@ func main() {
 
 	for _, dir := range []string{cfg.Paths.DataDir, cfg.Paths.JournalDir, cfg.Paths.WatchlistDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			log.Error("cannot create directory", "dir", dir, "err", err)
-			os.Exit(1)
+			fatal("cannot create directory %s: %v", dir, err)
 		}
 	}
 
 	eng, err := engine.New(cfg, log)
 	if err != nil {
-		log.Error("engine init failed", "err", err)
-		os.Exit(1)
+		fatal("engine init failed: %v", err)
 	}
 
-	// First SIGINT/SIGTERM: graceful — flatten open positions, sweep, exit.
+	// Fail fast (with a clear message) if the control-panel port is taken.
+	ln, err := net.Listen("tcp", cfg.Server.Listen)
+	if err != nil {
+		fatal("cannot listen on %s (%v).\nAnother copy of the engine may already be running, or another program uses this port.\nClose it, or change server.listen and server.public_url in %s.", cfg.Server.Listen, err, *cfgPath)
+	}
+	_ = ln.Close()
+
+	// First Ctrl+C / SIGTERM: graceful — flatten open positions, sweep, exit.
 	// Second signal: immediate exit (broker-side stops remain in place).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
-		stop() // restore default handling so a second signal kills the process
-		log.Warn("signal received — graceful shutdown (send again to force)")
+		stop()
+		log.Warn("shutdown requested — closing positions before exit (press Ctrl+C again to force)")
 		time.Sleep(60 * time.Second)
 		log.Error("graceful shutdown timed out — forcing exit")
 		os.Exit(1)
 	}()
 
-	if err := eng.Run(ctx); err != nil {
-		log.Error("engine stopped with error", "err", err)
-		os.Exit(1)
+	srv := web.New(eng, ring, log, version)
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.Serve(ctx, cfg.Server.Listen) }()
+
+	fmt.Printf("\n  Radha control panel:  %s\n  Mode: %s   (Ctrl+C to stop)\n\n", cfg.Server.PublicURL, cfg.Mode)
+	if !*noBrowser {
+		go func() {
+			time.Sleep(700 * time.Millisecond)
+			openBrowser(cfg.Server.PublicURL)
+		}()
+	}
+
+	engErr := make(chan error, 1)
+	go func() { engErr <- eng.Run(ctx) }()
+	select {
+	case err := <-srvErr:
+		if err != nil {
+			log.Error("control panel stopped", "err", err)
+			os.Exit(1)
+		}
+	case err := <-engErr:
+		if err != nil {
+			log.Error("engine stopped with error", "err", err)
+			os.Exit(1)
+		}
 	}
 	log.Info("engine stopped cleanly")
 }
 
-func newLogger(file string, debug bool) (*slog.Logger, func(), error) {
+func fatal(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "\nERROR: "+format+"\n\n", a...)
+	if runtime.GOOS == "windows" {
+		// Keep a double-clicked console window open long enough to read.
+		fmt.Fprintln(os.Stderr, "Press Enter to close.")
+		_, _ = fmt.Scanln()
+	}
+	os.Exit(2)
+}
+
+func openBrowser(u string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
+	case "darwin":
+		cmd = exec.Command("open", u)
+	default:
+		cmd = exec.Command("xdg-open", u)
+	}
+	_ = cmd.Start()
+}
+
+func newLogger(file string, debug bool, ring *web.LogRing) (*slog.Logger, func(), error) {
 	level := slog.LevelInfo
 	if debug {
 		level = slog.LevelDebug
@@ -110,7 +175,7 @@ func newLogger(file string, debug bool) (*slog.Logger, func(), error) {
 		}
 		return a
 	}})
-	return slog.New(h), closer, nil
+	return slog.New(ring.Handler(h, slog.LevelInfo)), closer, nil
 }
 
 func runCheck(cfg config.Config) int {
@@ -131,7 +196,11 @@ func runCheck(cfg config.Config) int {
 		fmt.Println("  warning:", w)
 	}
 	if err != nil {
-		fmt.Println("watchlist:", err)
+		if errors.Is(err, watchlist.ErrNoWatchlist) {
+			fmt.Println("watchlist: none yet — add it in the control panel")
+		} else {
+			fmt.Println("watchlist:", err)
+		}
 		return 1
 	}
 	fmt.Printf("watchlist OK: %d symbols\n", len(entries))

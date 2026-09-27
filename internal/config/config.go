@@ -2,10 +2,12 @@
 package config
 
 import (
+	_ "embed"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -254,12 +256,8 @@ func (c Config) Validate() error {
 	if c.Mode != "live" && c.Mode != "paper" {
 		add("mode must be live or paper, got %q", c.Mode)
 	}
-	if c.Kite.APIKey == "" {
-		add("kite.api_key is required")
-	}
-	if c.Kite.APISecret == "" && c.Kite.AccessToken == "" {
-		add("kite.api_secret (or env KITE_API_SECRET) is required for the daily login")
-	}
+	// kite.api_key / api_secret may also be entered in the web UI, so their
+	// absence is reported there rather than failing startup.
 	if c.Network.BindIP != "" {
 		ip := net.ParseIP(c.Network.BindIP)
 		if ip == nil || ip.To4() == nil {
@@ -331,4 +329,21 @@ func (c Config) Validate() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+//go:embed default.yaml
+var defaultYAML []byte
+
+// WriteDefault writes the annotated default configuration (paper mode) to
+// path if no file exists there. It returns true when a file was created.
+func WriteDefault(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	}
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return false, err
+		}
+	}
+	return true, os.WriteFile(path, defaultYAML, 0o644)
 }

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,51 @@ type Manager struct {
 	statusFn func() any
 
 	apiRoot, loginRoot string // dev overrides (simulator)
+	credPath           string
+}
+
+type credentials struct {
+	APIKey    string `json:"api_key"`
+	APISecret string `json:"api_secret"`
+}
+
+// APIKey returns the Kite API key in use.
+func (m *Manager) APIKey() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.apiKey
+}
+
+// HasSecret reports whether an API secret is configured.
+func (m *Manager) HasSecret() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.apiSecret != ""
+}
+
+func (m *Manager) secret() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.apiSecret
+}
+
+// SetCredentials stores the API key/secret (entered in the UI) with 0600
+// permissions under the data directory. Empty values keep the current one.
+func (m *Manager) SetCredentials(key, secret string) error {
+	m.mu.Lock()
+	if key != "" {
+		m.apiKey = key
+	}
+	if secret != "" {
+		m.apiSecret = secret
+	}
+	c := credentials{APIKey: m.apiKey, APISecret: m.apiSecret}
+	m.mu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(m.credPath), 0o700); err != nil {
+		return err
+	}
+	raw, _ := json.MarshalIndent(c, "", "  ")
+	return os.WriteFile(m.credPath, raw, 0o600)
 }
 
 // SetRoots points the login flow at a simulator (dev only).
@@ -72,7 +118,20 @@ func (m *Manager) SetRoots(apiRoot, loginRoot string) { m.apiRoot, m.loginRoot =
 func NewManager(apiKey, apiSecret, dataDir, publicURL string, httpc *http.Client, clk clock.Clock, log *slog.Logger) *Manager {
 	m := &Manager{
 		apiKey: apiKey, apiSecret: apiSecret, path: filepath.Join(dataDir, "kite_token.json"),
+		credPath:  filepath.Join(dataDir, "kite_credentials.json"),
 		publicURL: publicURL, httpc: httpc, clk: clk, log: log, changed: make(chan struct{}),
+	}
+	// Credentials saved from the UI fill whatever config/env left empty.
+	if raw, err := os.ReadFile(m.credPath); err == nil {
+		var c credentials
+		if json.Unmarshal(raw, &c) == nil {
+			if m.apiKey == "" {
+				m.apiKey = c.APIKey
+			}
+			if m.apiSecret == "" {
+				m.apiSecret = c.APISecret
+			}
+		}
 	}
 	if raw, err := os.ReadFile(m.path); err == nil {
 		var t Token
@@ -150,7 +209,11 @@ func (m *Manager) WaitForToken(ctx context.Context) (Token, error) {
 func (m *Manager) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
-		c := kiteconnect.New(m.apiKey)
+		if m.APIKey() == "" || !m.HasSecret() {
+			http.Redirect(w, r, "/?login_error="+url.QueryEscape("Enter your Kite API key and secret first"), http.StatusFound)
+			return
+		}
+		c := kiteconnect.New(m.APIKey())
 		u := c.GetLoginURL()
 		if m.loginRoot != "" {
 			u = strings.Replace(u, "https://kite.zerodha.com", m.loginRoot, 1)
@@ -160,25 +223,25 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("GET /kite/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if q.Get("status") != "success" || q.Get("request_token") == "" {
-			http.Error(w, "login not successful", http.StatusBadRequest)
+			http.Redirect(w, r, "/?login_error="+url.QueryEscape("Zerodha login was not completed"), http.StatusFound)
 			return
 		}
-		c := kiteconnect.New(m.apiKey)
+		c := kiteconnect.New(m.APIKey())
 		if m.apiRoot != "" {
 			c.SetBaseURI(m.apiRoot)
 		}
 		if m.httpc != nil {
 			c.SetHTTPClient(m.httpc)
 		}
-		sess, err := c.GenerateSession(q.Get("request_token"), m.apiSecret)
+		sess, err := c.GenerateSession(q.Get("request_token"), m.secret())
 		if err != nil {
-			m.log.Error("generate session failed", "err", err)
-			http.Error(w, "session exchange failed: "+err.Error(), http.StatusBadGateway)
+			m.log.Error("generate session failed — check the API secret", "err", err)
+			http.Redirect(w, r, "/?login_error="+url.QueryEscape("Session exchange failed (usually a wrong API secret): "+err.Error()), http.StatusFound)
 			return
 		}
 		m.store(Token{AccessToken: sess.AccessToken, UserID: sess.UserID, CreatedAt: m.clk.Now()})
 		m.log.Info("Kite session established", "user", sess.UserID)
-		fmt.Fprintf(w, "Logged in as %s. The engine has today's token; you can close this tab.\n", sess.UserID)
+		http.Redirect(w, r, "/?login=ok", http.StatusFound)
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.RLock()

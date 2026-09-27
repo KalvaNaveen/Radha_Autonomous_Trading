@@ -12,6 +12,41 @@ order manager.
 
 ---
 
+## Quick start: no Go install needed
+
+Ready-made binaries are in `dist/`:
+
+| OS | File |
+|---|---|
+| Windows | `radha-engine-windows-amd64.exe` |
+| Mac (Apple Silicon) | `radha-engine-darwin-arm64` |
+| Mac (Intel) | `radha-engine-darwin-amd64` |
+| Linux | `radha-engine-linux-amd64` |
+
+1. Copy the file for your OS into an empty folder, e.g. `C:\Radha`.
+2. Run it. Double-click on Windows; the first time, SmartScreen may warn — click **More info → Run anyway**. On Mac, run `chmod +x` on the file first.
+3. On the first run it creates `config.yaml` (paper mode) and opens the **control panel** at `http://127.0.0.1:8080`.
+4. Follow the checklist in the panel:
+   1. Paste your Kite **API key and secret**. They're saved on this computer only, in `data/kite_credentials.json`.
+   2. In developers.kite.trade, set your app's **Redirect URL** to `http://127.0.0.1:8080/kite/callback`. The panel has a Copy button for it.
+   3. Click **Log in with Zerodha**. You need to do this every morning, because tokens expire at 06:00.
+   4. Add the **watchlist**: one NSE symbol per line.
+5. Leave the window open. The engine prepares at 08:30, warms up from 09:15, trades 09:45–14:45, squares off at 15:08, and journals the day.
+
+### Control panel
+
+| Area | What it shows / does |
+|---|---|
+| Checklist | Credentials, today's Kite login, the watchlist for the next trading day, the engine stage, the live feed. Each item turns ✓ when done, and anything that stopped the engine is shown with a **Retry today** button |
+| KPIs | Day P&L (net), realized, unrealized, trades, open positions, order budget left, halt reason |
+| Agents | One row per stock: state, LTP, VWAP, EMA10/20, RVOL, position, stop, lock stage, trades, net, and why the last signal fired or was skipped |
+| Watchlist | Edit and save any date's list; the list is checked as you save, and saving wakes a session that's waiting for it |
+| Trades today | The journal: entry/exit, gross, costs, net, lock stage reached, exit reason |
+| History | Per-day P&L bars, win rate and cumulative net: the 15-day paper review in one place |
+| Logs | Live log stream, optionally filtered to warnings and errors |
+
+---
+
 ## Your daily routine
 
 | When | You | Engine |

@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radha Control Panel</title>
+<style>
+:root{
+  --bg:#f5f6f8;--panel:#ffffff;--ink:#16181d;--muted:#5d6472;--line:#e3e6eb;--soft:#f0f2f5;
+  --accent:#2f5bd3;--accent-ink:#ffffff;--good:#11845b;--good-bg:#e6f5ee;--bad:#c2372f;--bad-bg:#fbeceb;
+  --warn:#9a6700;--warn-bg:#fff5d6;--info-bg:#e9efff;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f1115;--panel:#171a21;--ink:#e8eaee;--muted:#9aa2b1;--line:#262b35;--soft:#1d2129;
+  --accent:#6f93ff;--accent-ink:#0b0d12;--good:#3ecf8e;--good-bg:#12291f;--bad:#ff6b61;--bad-bg:#2e1614;
+  --warn:#f0c14b;--warn-bg:#2d2511;--info-bg:#18223d;}}
+:root[data-theme="dark"]{
+  --bg:#0f1115;--panel:#171a21;--ink:#e8eaee;--muted:#9aa2b1;--line:#262b35;--soft:#1d2129;
+  --accent:#6f93ff;--accent-ink:#0b0d12;--good:#3ecf8e;--good-bg:#12291f;--bad:#ff6b61;--bad-bg:#2e1614;
+  --warn:#f0c14b;--warn-bg:#2d2511;--info-bg:#18223d;}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans)}
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line)}
+.bar{max-width:1280px;margin:0 auto;padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.brand{font-weight:700;font-size:16px;letter-spacing:.2px}
+.brand small{font-weight:500;color:var(--muted);margin-left:6px}
+.spacer{flex:1}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:var(--soft);color:var(--muted);white-space:nowrap}
+.chip.good{background:var(--good-bg);color:var(--good)}.chip.bad{background:var(--bad-bg);color:var(--bad)}
+.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.info{background:var(--info-bg);color:var(--accent)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+main{max-width:1280px;margin:0 auto;padding:16px;display:grid;gap:16px}
+.grid2{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:16px;align-items:start}
+@media (max-width:900px){.grid2{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+.card h2{margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted)}
+.banner{border-radius:10px;padding:10px 14px;font-weight:500}
+.banner.bad{background:var(--bad-bg);color:var(--bad)}.banner.good{background:var(--good-bg);color:var(--good)}
+.banner.warn{background:var(--warn-bg);color:var(--warn)}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.step{display:grid;grid-template-columns:26px 1fr;gap:10px;padding:10px;border:1px solid var(--line);border-radius:10px}
+.step .ic{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:13px;font-weight:700;background:var(--soft);color:var(--muted)}
+.step.ok .ic{background:var(--good-bg);color:var(--good)}.step.todo .ic{background:var(--warn-bg);color:var(--warn)}
+.step.err .ic{background:var(--bad-bg);color:var(--bad)}
+.step>div{min-width:0}.step b.t{display:block}.step p{margin:2px 0 0;color:var(--muted);font-size:13px}
+.step .actions{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+button,.btn{appearance:none;border:1px solid var(--line);background:var(--soft);color:var(--ink);padding:7px 12px;border-radius:8px;font:600 13px var(--sans);cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+button.primary,.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+button:disabled{opacity:.5;cursor:default}
+input,textarea{width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:13px var(--sans)}
+textarea{font-family:var(--mono);min-height:260px;resize:vertical}
+label{font-size:12px;color:var(--muted);display:block;margin:8px 0 4px}
+code,.mono{font-family:var(--mono);font-size:12px}
+.copy{display:flex;gap:6px;align-items:center;margin-top:6px;min-width:0}.copy code{background:var(--soft);padding:4px 8px;border-radius:6px;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;white-space:nowrap}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.kpi .l{font-size:12px;color:var(--muted)}.kpi .v{font-size:22px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums}
+.pos{color:var(--good)}.neg{color:var(--bad)}
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{font-size:12px;color:var(--muted);font-weight:600}
+td.num,th.num{text-align:right}
+td.sig{white-space:normal;min-width:260px;color:var(--muted);font-size:12px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:-4px -4px 12px;flex-wrap:wrap}
+.tab{border:none;background:none;padding:8px 12px;border-bottom:2px solid transparent;border-radius:0;color:var(--muted)}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent)}
+.logs{font-family:var(--mono);font-size:12px;max-height:420px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px}
+.logs div{padding:2px 0;border-bottom:1px dashed var(--line);white-space:pre-wrap;word-break:break-word}
+.lv-WARN{color:var(--warn)}.lv-ERROR{color:var(--bad)}.lv-DEBUG{color:var(--muted)}
+.muted{color:var(--muted)}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.empty{padding:24px;text-align:center;color:var(--muted)}
+.bars{display:flex;align-items:flex-end;gap:6px;height:120px;padding:8px 0;border-bottom:1px solid var(--line);margin-bottom:10px}
+.bars .b{flex:1;min-width:10px;border-radius:4px 4px 0 0;position:relative}
+.bars .b span{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:10px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <div class="brand">Radha <small>kitealgo control panel</small></div>
+  <span id="mode" class="chip">…</span>
+  <span id="phase" class="chip">…</span>
+  <span id="feed" class="chip">feed</span>
+  <div class="spacer"></div>
+  <span id="clock" class="mono muted"></span>
+  <button id="theme" title="Toggle theme">◐</button>
+</div></header>
+
+<main>
+  <div id="banners"></div>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Today's checklist</h2>
+      <ol class="steps" id="steps"></ol>
+      <div id="cred" class="step" hidden style="grid-template-columns:1fr;margin-top:10px"><div>
+        <b class="t">Kite API credentials</b>
+        <label>API key</label><input id="ck" autocomplete="off" placeholder="from developers.kite.trade → your app">
+        <label>API secret</label><input id="cs" type="password" autocomplete="off" placeholder="stored on this computer only">
+        <div class="actions" style="margin-top:10px"><button class="primary" onclick="saveCred()">Save credentials</button><span id="cmsg" class="muted"></span></div>
+      </div></div>
+    </section>
+
+    <div style="display:grid;gap:16px;min-width:0">
+      <div class="kpis" id="kpis"></div>
+
+    </div>
+  </div>
+
+      <section class="card">
+    <h2>Agents</h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Symbol</th><th>State</th><th class="num">LTP</th><th class="num">VWAP</th><th class="num">EMA10</th><th class="num">EMA20</th><th class="num">RVOL</th><th>Position</th><th class="num">Stop</th><th class="num">Trades</th><th class="num">Net ₹</th><th>Last signal</th></tr></thead>
+      <tbody id="agents"><tr><td colspan="12" class="empty">Agents appear here once today's session is prepared (from the preparation time, after you log in).</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section class="card">
+    <div class="tabs" id="tabs">
+      <button class="tab on" data-t="wl">Watchlist</button>
+      <button class="tab" data-t="tr">Trades today</button>
+      <button class="tab" data-t="hi">History</button>
+      <button class="tab" data-t="lg">Logs</button>
+    </div>
+
+    <div data-p="wl">
+      <div class="row" style="margin-bottom:8px">
+        <label style="margin:0">Trading date</label>
+        <input id="wlDate" type="date" style="width:auto">
+        <span id="wlDayNote" class="muted"></span>
+      </div>
+      <textarea id="wlText" spellcheck="false" placeholder="symbol,benchmark&#10;RELIANCE,NIFTY ENERGY&#10;HDFCBANK,NIFTY BANK&#10;TCS,NIFTY IT&#10;INFY"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="wlSave">Save watchlist</button>
+        <span id="wlMsg" class="muted"></span>
+      </div>
+      <p class="muted" style="margin-bottom:0">One NSE symbol per line, up to 50. <code>benchmark</code> is an optional sector index (for example <code>NIFTY BANK</code>). Lines starting with # are ignored.</p>
+    </div>
+
+    <div data-p="tr" hidden>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Symbol</th><th>Side</th><th class="num">Qty</th><th>Entry</th><th class="num">Price</th><th>Exit</th><th class="num">Price</th><th class="num">Gross ₹</th><th class="num">Costs ₹</th><th class="num">Net ₹</th><th>Lock</th><th>Reason</th></tr></thead>
+        <tbody id="trades"></tbody>
+      </table></div>
+    </div>
+
+    <div data-p="hi" hidden>
+      <div id="histChart"></div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Date</th><th class="num">Trades</th><th class="num">Wins</th><th class="num">Win rate</th><th class="num">Net ₹</th><th class="num">Cumulative ₹</th></tr></thead>
+        <tbody id="hist"></tbody>
+      </table></div>
+    </div>
+
+    <div data-p="lg" hidden>
+      <div class="row" style="margin-bottom:8px">
+        <label class="row" style="margin:0"><input type="checkbox" id="onlyWarn" style="width:auto"> warnings and errors only</label>
+      </div>
+      <div class="logs" id="logs"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const inr = v => (v==null||isNaN(v)) ? '—' : '₹' + Number(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+const num = (v,d=2) => (v==null||v===0) ? '—' : Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
+const sgn = v => v>0?'pos':v<0?'neg':'';
+const esc = s => String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const api = (u,o={}) => fetch(u,{...o,headers:{'X-Kitealgo':'1','Content-Type':'application/json',...(o.headers||{})}});
+let S = null, wlLoadedFor = null;
+
+// theme
+try{ const t=localStorage.getItem('theme'); if(t) document.documentElement.dataset.theme=t; }catch(e){}
+$('#theme').onclick=()=>{const cur=document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+  const n=cur==='dark'?'light':'dark'; document.documentElement.dataset.theme=n; try{localStorage.setItem('theme',n)}catch(e){}};
+
+// tabs
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('[data-p]').forEach(p=>p.hidden=p.dataset.p!==b.dataset.t);
+  if(b.dataset.t==='tr'||b.dataset.t==='hi') loadJournal();
+});
+
+// banners from login redirect
+const qp = new URLSearchParams(location.search);
+const flash = [];
+if(qp.get('login')==='ok') flash.push(['good','Logged in to Kite. Today\'s token is saved — the engine takes it from here.']);
+if(qp.get('login_error')) flash.push(['bad',qp.get('login_error')]);
+if(qp.toString()) history.replaceState(null,'','/');
+
+const STAGES = {
+  starting:['info','Starting'], sleeping:['','Sleeping'], waiting_prepare:['info','Waiting for preparation'],
+  waiting_login:['warn','Waiting for Kite login'], loading_watchlist:['info','Reading watchlist'],
+  waiting_watchlist:['warn','Waiting for watchlist'], loading_instruments:['info','Loading instruments'],
+  loading_history:['info','Loading history'], running:['good','Running'], closed:['','Session closed'], aborted:['bad','Stopped — needs attention']
+};
+
+function step(state, title, body, actions=''){
+  const ic = state==='ok'?'✓':state==='err'?'!':state==='todo'?'•':'…';
+  return `<li class="step ${state}"><div class="ic">${ic}</div><div><b class="t">${title}</b><p>${body}</p>${actions?`<div class="actions">${actions}</div>`:''}</div></li>`;
+}
+
+function renderSteps(){
+  const su=S.setup, e=S.engine, wl=S.watchlist, sess=e.session;
+  const out=[];
+  // 1 credentials
+  if(su.api_key_set && su.secret_set){
+    out.push(step('ok','Kite API credentials',`API key ${esc(su.api_key_hint)} and secret saved.`,
+      `<button onclick="toggleCred()">Change</button>`));
+  } else {
+    out.push(step('todo','Kite API credentials','Paste the API key and secret from developers.kite.trade → your app (form below).'));
+    $('#cred').hidden=false;
+  }
+  // 2 login
+  if(su.token_valid){
+    out.push(step('ok','Logged in to Kite today',`User <b>${esc(su.user_id)}</b> — token valid until 06:00 tomorrow.`,`<a class="btn" href="/login">Log in again</a>`));
+  } else {
+    const can = su.api_key_set && su.secret_set;
+    out.push(step('todo','Log in to Kite (daily)',`Needed once every morning (tokens expire at 06:00). Your Kite app's Redirect URL must be exactly:<span class="copy"><code id="ru">${esc(su.redirect_url)}</code><button onclick="navigator.clipboard.writeText('${esc(su.redirect_url)}')">Copy</button></span>`,
+      can?`<a class="btn primary" href="/login">Log in with Zerodha</a>`:`<button disabled>Log in with Zerodha</button><span class="muted">(enter credentials first)</span>`));
+  }
+  // 3 watchlist
+  if(wl.exists && !wl.error){
+    const w = (wl.warnings||[]).length?`<br><span style="color:var(--warn)">${wl.warnings.map(esc).join('<br>')}</span>`:'';
+    out.push(step('ok',`Watchlist for ${fmtDate(wl.date)}`,`${wl.count} symbols: ${esc((wl.symbols||[]).slice(0,12).join(', '))}${wl.count>12?' …':''}${w}`,
+      `<button onclick="openWL('${wl.date}')">Edit</button>`));
+  } else {
+    out.push(step(wl.exists?'err':'todo',`Watchlist for ${fmtDate(wl.date)}`, wl.exists?esc(wl.error):'No list yet. Add the symbols to trade on this day.',
+      `<button class="primary" onclick="openWL('${wl.date}')">Add symbols</button>`));
+  }
+  // 4 engine
+  const [cls,label]=STAGES[e.stage]||['',e.stage];
+  const st = e.stage==='running'?'ok':e.stage==='aborted'?'err':(e.stage==='waiting_login'||e.stage==='waiting_watchlist')?'todo':'wait';
+  let body = esc(e.detail||'');
+  if(e.last_error) body += `<br><span style="color:var(--bad)">${esc(e.last_error)}</span>`;
+  out.push(step(st,`Engine: ${label}`, body, e.stage==='aborted'?`<button class="primary" onclick="retry()">Retry today</button>`:''));
+  // 5 feed
+  if(sess){
+    const tk=sess.ticker||{};
+    out.push(step(tk.connected?'ok':'err','Live market feed', tk.connected?`Connected — ${Number(tk.ticks||0).toLocaleString('en-IN')} ticks received.`:'Not connected. Check your internet connection; the engine reconnects automatically.'));
+  } else {
+    out.push(step('wait','Live market feed',`Connects when the session is prepared (${esc(S.config.prepare_at.slice(0,5))}, after login). Trading ${esc(S.config.trading_start.slice(0,5))}–${esc(S.config.entry_cutoff.slice(0,5))}, square-off ${esc(S.config.square_off.slice(0,5))}.`));
+  }
+  $('#steps').innerHTML=out.join('');
+}
+let credForced=false;
+window.toggleCred=()=>{const c=$('#cred'); c.hidden=!c.hidden; credForced=!c.hidden;};
+window.saveCred=async()=>{
+  const r=await api('/api/credentials',{method:'POST',body:JSON.stringify({api_key:$('#ck').value,api_secret:$('#cs').value})});
+  const j=await r.json(); $('#cmsg').textContent = r.ok?'Saved.':j.error;
+  if(r.ok){ $('#ck').value=''; $('#cs').value=''; credForced=false; setTimeout(()=>{$('#cred').hidden=true; $('#cmsg').textContent='';},1200); refresh(); }
+};
+window.retry=async()=>{await api('/api/retry',{method:'POST'}); setTimeout(refresh,500);};
+
+function fmtDate(d){ if(!d) return ''; const x=new Date(d+'T00:00:00+05:30'); return x.toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short'}); }
+
+function renderHeader(){
+  const m=$('#mode'); m.textContent=S.mode.toUpperCase()+(S.setup.dev_mock?' · SIMULATOR':''); m.className='chip '+(S.mode==='live'?'bad':'info');
+  const sess=S.engine.session;
+  const p=$('#phase');
+  if(sess){ p.textContent=sess.phase; p.className='chip '+({ACTIVE:'good',WARMUP:'info',EXIT_ONLY:'warn',CLOSED:''}[sess.phase]||''); }
+  else { const [c,l]=STAGES[S.engine.stage]||['',S.engine.stage]; p.textContent=l; p.className='chip '+c; }
+  const f=$('#feed'); const tk=sess&&sess.ticker;
+  f.innerHTML=`<span class="dot"></span>${tk?(tk.connected?'feed live':'feed down'):'feed idle'}`; f.className='chip '+(tk?(tk.connected?'good':'bad'):'');
+}
+
+function renderKPIs(){
+  const sess=S.engine.session; const r=(sess&&sess.risk)||{}; const o=(sess&&sess.orders)||{};
+  const net=(r.realized||0)+(r.unrealized||0);
+  const k=[['Day P&L (net)',inr(net),sgn(net)],['Realized',inr(r.realized||0),sgn(r.realized)],['Unrealized',inr(r.unrealized||0),sgn(r.unrealized)],
+    ['Trades',r.trades??0,''],['Open positions',`${r.open_positions??0} / ${S.config.max_open_positions}`,''],
+    ['Orders left today', sess?(o.RemainingDay??'—'):'—','']];
+  if(r.halted) k.push(['Halted',esc(r.halt_reason||'yes'),'neg']);
+  $('#kpis').innerHTML=k.map(([l,v,c])=>`<div class="kpi"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`).join('');
+}
+
+const LOCK_LABEL={NONE:'initial stop',BREAKEVEN:'breakeven locked',PROFIT_LOCK:'+0.25% net locked'};
+const STATE_CHIP={FLAT:'',PENDING_ENTRY:'info',IN_POSITION:'good',TRAILING:'good',PENDING_EXIT:'warn',HALTED:''};
+function renderAgents(){
+  const sess=S.engine.session; if(!sess||!sess.agents) return;
+  const rows=sess.agents.slice().sort((a,b)=>(b.position?1:0)-(a.position?1:0)||a.symbol.localeCompare(b.symbol));
+  $('#agents').innerHTML=rows.map(a=>{
+    const p=a.position; const side=p?(p.Side==='LONG'?'<span class="chip good">LONG</span>':'<span class="chip bad">SHORT</span>'):'';
+    const pos=p?`${side} ${p.Quantity} @ ${num(p.EntryPrice)}<br><span class="muted">${esc(LOCK_LABEL[p.Lock]||p.Lock)}</span>`:'<span class="muted">—</span>';
+    return `<tr><td><b>${esc(a.symbol)}</b></td><td><span class="chip ${STATE_CHIP[a.state]||''}">${esc(a.state)}</span></td>
+      <td class="num">${num(a.ltp)}</td><td class="num">${num(a.vwap)}</td><td class="num">${num(a.ema10)}</td><td class="num">${num(a.ema20)}</td>
+      <td class="num ${a.rvol>=1.5?'pos':''}">${num(a.rvol)}</td><td>${pos}</td><td class="num">${p?num(p.StopPrice):'—'}</td>
+      <td class="num">${a.trades_today}</td><td class="num ${sgn(a.realized_pnl)}">${a.realized_pnl?num(a.realized_pnl):'—'}</td>
+      <td class="sig">${esc(a.last_signal||'')}</td></tr>`;}).join('') || `<tr><td colspan="12" class="empty">No agents.</td></tr>`;
+}
+
+function renderBanners(){
+  const b=[...flash];
+  if(S.mode==='live') b.push(['bad','LIVE MODE — real orders are being placed.']);
+  if(S.engine.stage==='aborted' && S.engine.last_error) b.push(['bad','Today\'s session stopped: '+S.engine.last_error]);
+  $('#banners').innerHTML=b.map(([c,t])=>`<div class="banner ${c}">${esc(t)}</div>`).join('');
+}
+
+async function refresh(){
+  try{
+    const r=await fetch('/api/state',{cache:'no-store'}); S=await r.json();
+    renderHeader(); renderBanners(); renderSteps(); renderKPIs(); renderAgents();
+    $('#clock').textContent=new Date(S.now).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour12:false})+' IST';
+    if(!wlLoadedFor){ openWL(S.watchlist.date,false); }
+  }catch(e){ $('#banners').innerHTML=`<div class="banner bad">Cannot reach the engine. Is it still running?</div>`; }
+}
+
+// watchlist editor
+window.openWL=async(date,focus=true)=>{
+  wlLoadedFor=date; $('#wlDate').value=date;
+  const r=await fetch('/api/watchlist?date='+date,{cache:'no-store'}); const j=await r.json();
+  $('#wlText').value=j.content||''; $('#wlMsg').textContent='';
+  $('#wlDayNote').textContent = j.trading_day?fmtDate(date):'Not a trading day (weekend or listed holiday)';
+  if(focus){ document.querySelector('[data-t="wl"]').click(); $('#wlText').focus(); }
+};
+$('#wlDate').onchange=e=>openWL(e.target.value,false);
+$('#wlSave').onclick=async()=>{
+  const d=$('#wlDate').value;
+  const r=await api('/api/watchlist?date='+d,{method:'PUT',headers:{'Content-Type':'text/csv'},body:$('#wlText').value});
+  const j=await r.json();
+  if(!r.ok){ $('#wlMsg').innerHTML=`<span style="color:var(--bad)">${esc(j.error)}</span>`; return; }
+  const w=(j.info.warnings||[]);
+  $('#wlMsg').innerHTML=`<span style="color:var(--good)">Saved ${j.info.count} symbols for ${fmtDate(d)}.</span>`+(w.length?` <span style="color:var(--warn)">${w.map(esc).join(' · ')}</span>`:'');
+  refresh();
+};
+
+// journal
+async function loadJournal(){
+  const j=await (await fetch('/api/journal',{cache:'no-store'})).json();
+  $('#trades').innerHTML=(j.rows||[]).map(t=>`<tr><td><b>${esc(t.symbol)}</b></td><td>${esc(t.side)}</td><td class="num">${t.qty}</td>
+    <td>${esc((t.entry_time||'').slice(11,19))}</td><td class="num">${num(t.entry_price)}</td><td>${esc((t.exit_time||'').slice(11,19))}</td>
+    <td class="num">${num(t.exit_price)}</td><td class="num ${sgn(t.gross)}">${num(t.gross)}</td><td class="num">${num(t.costs)}</td>
+    <td class="num ${sgn(t.net)}"><b>${num(t.net)}</b></td><td>${esc(LOCK_LABEL[t.max_lock]||t.max_lock)}</td><td class="sig">${esc(t.reason)}</td></tr>`).join('')
+    || `<tr><td colspan="12" class="empty">No closed trades${j.date?' on '+fmtDate(j.date):''} yet.</td></tr>`;
+  let cum=0; const days=j.days||[];
+  $('#hist').innerHTML=days.map(d=>{cum+=d.net; return `<tr><td>${fmtDate(d.date)}</td><td class="num">${d.trades}</td><td class="num">${d.wins}</td>
+    <td class="num">${d.trades?Math.round(100*d.wins/d.trades)+'%':'—'}</td><td class="num ${sgn(d.net)}">${num(d.net)}</td><td class="num ${sgn(cum)}"><b>${num(cum)}</b></td></tr>`}).join('')
+    || `<tr><td colspan="6" class="empty">No sessions journaled yet. Each trading day adds a row here.</td></tr>`;
+  const mx=Math.max(1,...days.map(d=>Math.abs(d.net)));
+  $('#histChart').innerHTML=days.length?`<div class="bars">${days.map(d=>`<div class="b" title="${d.date}: ${inr(d.net)}" style="height:${Math.max(3,60*Math.abs(d.net)/mx)}%;background:${d.net>=0?'var(--good)':'var(--bad)'}"><span>${d.date.slice(8)}</span></div>`).join('')}</div>`:'';
+}
+
+// logs
+let lastSeq=0; const LOGMAX=600;
+async function pollLogs(){
+  try{
+    const r=await fetch('/api/logs?after='+lastSeq,{cache:'no-store'}); const lines=await r.json();
+    if(!lines.length) return;
+    const box=$('#logs'); const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-20;
+    for(const l of lines){ lastSeq=l.seq; const d=document.createElement('div'); d.className='lv-'+l.level; d.dataset.lv=l.level;
+      d.textContent=`${new Date(l.time).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour12:false})} ${l.level.padEnd(5)} ${l.msg}${l.attrs?'  '+l.attrs:''}`;
+      if($('#onlyWarn').checked && l.level==='INFO') d.hidden=true; box.appendChild(d); }
+    while(box.children.length>LOGMAX) box.firstChild.remove();
+    if(atBottom) box.scrollTop=box.scrollHeight;
+  }catch(e){}
+}
+$('#onlyWarn').onchange=e=>document.querySelectorAll('#logs div').forEach(d=>d.hidden=e.target.checked&&d.dataset.lv==='INFO');
+
+refresh(); pollLogs();
+setInterval(refresh,2000); setInterval(pollLogs,2500);
+setInterval(()=>{ if(!document.querySelector('[data-p="tr"]').hidden||!document.querySelector('[data-p="hi"]').hidden) loadJournal(); },10000);
+</script>
+</body>
+</html>
