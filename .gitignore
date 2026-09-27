@@ -1,0 +1,6 @@
+bin/
+data/
+journal/
+logs/
+config.yaml
+*.env

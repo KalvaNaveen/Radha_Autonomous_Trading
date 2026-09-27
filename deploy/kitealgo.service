@@ -1,0 +1,22 @@
+[Unit]
+Description=kitealgo intraday engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kitealgo
+WorkingDirectory=/opt/kitealgo
+EnvironmentFile=/etc/kitealgo.env
+ExecStart=/opt/kitealgo/bin/engine -config /opt/kitealgo/config.yaml
+# SIGTERM → the engine flattens open positions, sweeps, then exits.
+KillSignal=SIGTERM
+TimeoutStopSec=75
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/kitealgo
+
+[Install]
+WantedBy=multi-user.target

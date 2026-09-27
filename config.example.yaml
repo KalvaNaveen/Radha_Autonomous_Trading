@@ -1,0 +1,100 @@
+# kitealgo — engine configuration. Copy to config.yaml and edit.
+# Every value below is the built-in default unless marked REQUIRED.
+
+# "paper" simulates fills against the LIVE Kite feed (needs a daily login too).
+# Switch to "live" only after at least a few weeks of paper sessions.
+mode: paper
+
+kite:
+  api_key: "your_api_key"          # REQUIRED (or env KITE_API_KEY)
+  api_secret: ""                   # REQUIRED — prefer env KITE_API_SECRET
+  access_token: ""                 # leave empty; the daily /login flow fills it
+
+network:
+  # REQUIRED in live mode: the static IPv4 registered under "IP Whitelist" in
+  # developers.kite.trade. All order REST calls dial out from this address.
+  bind_ip: ""
+  request_timeout: 5s
+
+paths:
+  watchlist_dir: watchlists        # drop <YYYY-MM-DD>.csv here each evening
+  data_dir: data                   # token, instrument + history caches
+  journal_dir: journal             # one trades CSV per day
+  log_file: logs/engine.log
+
+session:                           # IST, HH:MM:SS
+  prepare_at: "08:30:00"           # load watchlist + history, wait for login
+  market_open: "09:15:00"
+  trading_start: "09:45:00"        # 09:15–09:45 warmup: ingest only
+  entry_cutoff: "14:45:00"         # exit-only after this
+  square_off: "15:08:00"           # kill switch (Zerodha auto-squares CAS stocks at 15:12)
+  safety_sweep: "15:09:30"         # verify flat AT THE BROKER, fix anything left
+  session_end: "15:35:00"
+
+strategy:
+  candle_interval: 5m
+  candle_grace: 2s                 # wait for late ticks before closing a bar
+  fast_ema: 10
+  slow_ema: 20
+  vwap_buffer_pct: 0.20            # long only above VWAP+0.2%, short below VWAP-0.2%
+  vwap_source: exchange            # exchange ATP (exact) | computed (from tick snapshots)
+  min_rvol: 1.5
+  rvol_lookback_days: 10
+  band_tolerance_pct: 0.15         # "near the EMA band"
+  pullback_candles: 2              # crossover bar + 1 more bar for the pullback
+  max_stop_pct: 0.80
+  min_stop_pct: 0.25
+  round_trip_cost_pct: 0.15
+  breakeven_trigger_pct: 0.40      # +0.40% gross → stop to entry ± 0.15% (costs covered)
+  profit_lock_trigger_pct: 0.65    # +0.65% gross → stop to entry ± 0.40% (+0.25% net locked)
+  min_net_profit_pct: 0.25
+  trail_buffer_pct: 0.25           # resting stop = 10 EMA ∓ 0.25%
+  min_stop_step_pct: 0.05          # skip trail moves smaller than this (Kite: 25 mods/order)
+  max_trades_per_symbol: 3
+  cooldown_candles: 1
+  entry_timeout: 15s
+
+risk:
+  capital: 100000                  # ₹ the engine may deploy
+  risk_per_trade_pct: 0.5          # ₹ lost if the initial stop is hit = 0.5% of capital
+  max_open_positions: 10
+  mis_leverage: 5                  # planning figure for notional caps / margin checks
+  daily_loss_limit_pct: 2.0        # realized+unrealized ≤ -2% → flatten all, halt the day
+  margin_buffer_pct: 10
+  margin_refresh: 30s
+
+orders:
+  max_ops: 8                       # SEBI registration threshold is 10 OPS
+  max_per_minute: 350              # Kite: 400
+  max_per_day: 4500                # Kite: 5000
+  emergency_reserve: 300           # daily budget entries may not consume
+  workers: 8
+  stop_retry_backoff: 100ms
+  emergency_retries: 3
+  market_protection: -1            # -1 = Kite automatic protection; else a percentage
+  entry_limit_buffer_pct: 0.5      # entry = IOC limit 0.5% beyond best ask/bid
+  max_mods_per_order: 24           # then cancel-and-replace the stop
+  reconcile_interval: 3s
+  entry_max_age: 10s               # drop entries that queued longer than this
+
+radar:
+  market_index: "NIFTY 50"
+  mode: permissive                 # strict | permissive | off
+  neutral_pct: 0.10
+
+ticker:
+  agent_buffer: 512
+  reconnect_max_delay: 10s
+  stale_after: 30s
+
+server:
+  # Local HTTP server: /login (daily), /kite/callback, /status, /healthz.
+  # Set your Kite app's Redirect URL to  <public_url>/kite/callback
+  # Keep it on localhost and reach it over an SSH tunnel:
+  #   ssh -L 8080:127.0.0.1:8080 you@your-vps   then open http://127.0.0.1:8080/login
+  listen: "127.0.0.1:8080"
+  public_url: "http://127.0.0.1:8080"
+
+# NSE trading holidays (YYYY-MM-DD). Weekends are skipped automatically.
+# Copy the dates from NSE's official holiday circular for the year.
+holidays: []
