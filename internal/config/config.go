@@ -87,16 +87,35 @@ type StrategyConfig struct {
 	MaxGapUpPct      float64 `yaml:"max_gap_up_pct"`  // skip entries that open this far above the signal close
 	RSLookback       int     `yaml:"rs_lookback"`     // relative-strength window, bars
 	CooldownBars     int     `yaml:"cooldown_bars"`   // wait after an exit before re-entering the symbol
+
+	Setups     string `yaml:"setups"`      // both | breakout | pullback
+	RegimeMode string `yaml:"regime_mode"` // basic: index > rising EMA50 · strict: also index > EMA20 > EMA50
+
+	// Heikin-Ashi filters (signals only — orders, stops and sizing use real prices).
+	HAEntry      string  `yaml:"ha_entry"`       // off | green | strong (green with no lower wick)
+	HAExit       string  `yaml:"ha_exit"`        // off | red (ha_exit_bars red HA candles in a row) | strong_red
+	HAExitBars   int     `yaml:"ha_exit_bars"`   // for ha_exit: red
+	HAExitAlways bool    `yaml:"ha_exit_always"` // apply the HA exit before breakeven too
+	HAWickPct    float64 `yaml:"ha_wick_pct"`    // a wick ≤ this % of the HA range counts as "no wick"
 }
 
 // RiskConfig holds portfolio limits.
 type RiskConfig struct {
-	Capital          float64 `yaml:"capital"`            // ₹ the engine may deploy (paper: starting cash)
-	RiskPerTradePct  float64 `yaml:"risk_per_trade_pct"` // equity lost if the initial stop is hit
-	MaxPositionPct   float64 `yaml:"max_position_pct"`   // max % of equity in one stock
-	MaxPositions     int     `yaml:"max_positions"`
-	MaxNewPerDay     int     `yaml:"max_new_per_day"`
-	DrawdownPausePct float64 `yaml:"drawdown_pause_pct"` // no new entries while equity is this far below its peak
+	Capital           float64 `yaml:"capital"`            // ₹ the engine may deploy (paper: starting cash)
+	RiskPerTradePct   float64 `yaml:"risk_per_trade_pct"` // equity lost if the initial stop is hit
+	MaxPositionPct    float64 `yaml:"max_position_pct"`   // max % of equity in one stock
+	MaxPositions      int     `yaml:"max_positions"`
+	MaxNewPerDay      int     `yaml:"max_new_per_day"`
+	DrawdownPausePct  float64 `yaml:"drawdown_pause_pct"`  // equity this far below its peak pauses new entries…
+	DrawdownPauseDays int     `yaml:"drawdown_pause_days"` // …for this many trading days, then the peak resets
+}
+
+// PauseDays is the drawdown pause length (0 in an older config means the default 20).
+func (r RiskConfig) PauseDays() int {
+	if r.DrawdownPauseDays <= 0 {
+		return 20
+	}
+	return r.DrawdownPauseDays
 }
 
 // CostsConfig models Zerodha equity-delivery charges.
@@ -162,13 +181,15 @@ func Defaults() Config {
 			EMAFast: 20, EMASlow: 50, ATRPeriod: 14, VolumeAvgPeriod: 20,
 			BreakoutLookback: 20, BreakoutVolRatio: 1.5,
 			PullbackLookback: 3, PullbackTolPct: 1.0, PullbackVolRatio: 1.0, SlopeLookback: 5,
-			StopATRMult: 2.0, MinStopPct: 3, MaxStopPct: 8,
+			StopATRMult: 3.0, MinStopPct: 3, MaxStopPct: 8,
 			BreakevenR: 1.0, LockR: 2.0, TrailATRMult: 3.0, ExitBelowEMAFast: true,
 			MaxHoldBars: 40, TimeStopMinR: 1.0,
 			MinPrice: 50, MinTurnoverCr: 10, MaxGapUpPct: 2.0, RSLookback: 60, CooldownBars: 5,
+			Setups: "breakout", RegimeMode: "basic",
+			HAEntry: "green", HAExit: "red", HAExitBars: 2, HAWickPct: 10,
 		},
 		Risk: RiskConfig{Capital: 100000, RiskPerTradePct: 1.0, MaxPositionPct: 20, MaxPositions: 5,
-			MaxNewPerDay: 2, DrawdownPausePct: 15},
+			MaxNewPerDay: 2, DrawdownPausePct: 15, DrawdownPauseDays: 20},
 		Costs: CostsConfig{BrokeragePct: 0, STTPct: 0.1, StampBuyPct: 0.015, ExchangePct: 0.00307,
 			SEBIPerCrore: 10, GSTPct: 18, DPPerSell: 15.34, SlippagePct: 0.10},
 		Orders: OrdersConfig{MaxOPS: 8, MaxPerMinute: 200, MaxPerDay: 2000, EmergencyReserve: 100, Workers: 4,
@@ -226,6 +247,21 @@ func (c Config) Validate() error {
 	if s.BreakevenR <= 0 || s.LockR <= s.BreakevenR {
 		add("strategy: need 0 < breakeven_r < lock_r")
 	}
+	if !oneOf(s.Setups, "", "both", "breakout", "pullback") {
+		add("strategy.setups must be both, breakout or pullback, got %q", s.Setups)
+	}
+	if !oneOf(s.RegimeMode, "", "basic", "strict") {
+		add("strategy.regime_mode must be basic or strict, got %q", s.RegimeMode)
+	}
+	if !oneOf(s.HAEntry, "", "off", "green", "strong") {
+		add("strategy.ha_entry must be off, green or strong, got %q", s.HAEntry)
+	}
+	if !oneOf(s.HAExit, "", "off", "red", "strong_red") {
+		add("strategy.ha_exit must be off, red or strong_red, got %q", s.HAExit)
+	}
+	if s.HAExit == "red" && s.HAExitBars < 1 {
+		add("strategy.ha_exit_bars must be >= 1")
+	}
 	r := c.Risk
 	if r.Capital <= 0 || r.RiskPerTradePct <= 0 || r.RiskPerTradePct > 5 || r.MaxPositions < 1 || r.MaxPositionPct <= 0 || r.MaxPositionPct > 100 {
 		add("risk: capital > 0, 0 < risk_per_trade_pct <= 5, max_positions >= 1, 0 < max_position_pct <= 100")
@@ -251,6 +287,15 @@ func (c Config) Validate() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func oneOf(v string, opts ...string) bool {
+	for _, o := range opts {
+		if v == o {
+			return true
+		}
+	}
+	return false
 }
 
 //go:embed default.yaml

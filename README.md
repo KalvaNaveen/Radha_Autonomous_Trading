@@ -58,8 +58,10 @@ positions stay protected by their GTTs at Zerodha while it's off.
 **Market regime:** new entries are allowed only while NIFTY 50 closes above a rising 50-day EMA. Open positions are always managed.
 
 **Setups** (on the completed daily candle):
-- **Breakout:** close above the prior 20-day high, on at least 1.5× average volume.
-- **Pullback:** the low touched the 20-day EMA (within 1%) in the last 3 sessions, and today closed above the 20-day EMA and above yesterday's high, on at least average volume.
+- **Breakout** (default): close above the prior 20-day high, on at least 1.5× average volume.
+- **Pullback** (off by default, `setups: both` turns it on): the low touched the 20-day EMA (within 1%) in the last 3 sessions, and today closed above the 20-day EMA and above yesterday's high, on at least average volume.
+
+**Heikin-Ashi confirmation:** the signal day's Heikin-Ashi candle must be green (`ha_entry`). Heikin-Ashi prices are used only as a signal; orders, stops and sizing always use real prices.
 
 **Ranking:** 60-day return relative to NIFTY 50. Up to 5 positions in total, at most 2 new ones per day.
 
@@ -72,7 +74,7 @@ positions stay protected by their GTTs at Zerodha while it's off.
 
 | Stage | When | Stop |
 |---|---|---|
-| Initial | On entry | Entry − 2 × ATR(14), kept between 3% and 8% below entry |
+| Initial | On entry | Entry − 3 × ATR(14), kept between 3% and 8% below entry |
 | Breakeven | Close ≥ entry + 1R | Entry + round-trip costs |
 | Locked | Close ≥ entry + 2R | Entry + 1R |
 | Trailing | After breakeven | Highest close − 3 × ATR (only if higher than the current stop) |
@@ -80,8 +82,13 @@ positions stay protected by their GTTs at Zerodha while it's off.
 **Exits:**
 - the stop is hit (GTT);
 - after breakeven, a close below the 20-day EMA → sell at the next morning run;
+- after breakeven, 2 red Heikin-Ashi candles in a row → sell at the next morning run (`ha_exit`);
 - time stop: 40 sessions without reaching +1R;
 - cooldown: no re-entry in the same stock for 5 sessions after an exit.
+
+**Drawdown breaker:** if equity falls 15% below its peak, new entries pause for 20 trading days; then the peak resets to current equity and trading resumes.
+
+**Why these defaults:** `tools/study` replays variants on cached Kite candles over 5 years and each half separately. On the default 25-stock list, the old rules (both setups, 2×ATR stop, no Heikin-Ashi) returned −15.5% with a 27.7% max drawdown; breakout-only + 3×ATR stop + Heikin-Ashi returned +2.8% with a 14.7% drawdown and improved both halves. NIFTY 50 returned +28% over the same period, so this is still not an edge worth live money — widen the universe and re-run the study before trading real capital.
 
 **Costs modelled:** Zerodha delivery charges.
 - brokerage ₹0;

@@ -23,6 +23,10 @@ type Series struct {
 	ATR       []float64
 	VolAvg    []float64 // average volume of the N bars ending at i
 	PriorHigh []float64 // highest high of the N bars before i
+	HAOpen    []float64 // Heikin-Ashi candles (signals only)
+	HAHigh    []float64
+	HALow     []float64
+	HAClose   []float64
 	byDate    map[string]int
 }
 
@@ -30,9 +34,9 @@ type Series struct {
 func NewSeries(bars []models.Bar, p config.StrategyConfig) *Series {
 	n := len(bars)
 	s := &Series{Bars: bars, Close: make([]float64, n), byDate: make(map[string]int, n)}
-	h, l, v := make([]float64, n), make([]float64, n), make([]float64, n)
+	o, h, l, v := make([]float64, n), make([]float64, n), make([]float64, n), make([]float64, n)
 	for i, b := range bars {
-		s.Close[i], h[i], l[i], v[i] = b.Close, b.High, b.Low, b.Volume
+		s.Close[i], o[i], h[i], l[i], v[i] = b.Close, b.Open, b.High, b.Low, b.Volume
 		s.byDate[DateKey(b.Date)] = i
 	}
 	s.EMAFast = indicators.EMA(s.Close, p.EMAFast)
@@ -40,7 +44,25 @@ func NewSeries(bars []models.Bar, p config.StrategyConfig) *Series {
 	s.ATR = indicators.ATR(h, l, s.Close, p.ATRPeriod)
 	s.VolAvg = indicators.SMA(v, p.VolumeAvgPeriod)
 	s.PriorHigh = indicators.PriorHighest(h, p.BreakoutLookback)
+	s.HAOpen, s.HAHigh, s.HALow, s.HAClose = indicators.HeikinAshi(o, h, l, s.Close)
 	return s
+}
+
+// HAGreen reports whether Heikin-Ashi candle i closed above its open.
+func (s *Series) HAGreen(i int) bool { return s.HAClose[i] > s.HAOpen[i] }
+
+// HARed reports whether Heikin-Ashi candle i closed below its open.
+func (s *Series) HARed(i int) bool { return s.HAClose[i] < s.HAOpen[i] }
+
+// haWick returns the lower and upper wick of HA candle i as a % of its range.
+func (s *Series) haWick(i int) (lower, upper float64) {
+	rng := s.HAHigh[i] - s.HALow[i]
+	if rng <= 0 {
+		return 0, 0
+	}
+	lo := math.Min(s.HAOpen[i], s.HAClose[i])
+	hi := math.Max(s.HAOpen[i], s.HAClose[i])
+	return (lo - s.HALow[i]) / rng * 100, (s.HAHigh[i] - hi) / rng * 100
 }
 
 // DateKey formats a bar date as YYYY-MM-DD.
@@ -84,7 +106,11 @@ func (st *Strategy) RegimeOK(idx *Series, i int) bool {
 	if idx == nil || i < st.P.EMASlow+st.P.SlopeLookback {
 		return false
 	}
-	return idx.Close[i] > idx.EMASlow[i] && idx.EMASlow[i] >= idx.EMASlow[i-st.P.SlopeLookback]
+	ok := idx.Close[i] > idx.EMASlow[i] && idx.EMASlow[i] >= idx.EMASlow[i-st.P.SlopeLookback]
+	if ok && st.P.RegimeMode == "strict" {
+		ok = idx.Close[i] > idx.EMAFast[i] && idx.EMAFast[i] > idx.EMASlow[i]
+	}
+	return ok
 }
 
 // RelativeStrength is the stock's RSLookback-bar % return minus the index's.
@@ -132,10 +158,11 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 	prevVolAvg := s.VolAvg[i-1]
 	var kind models.SetupKind
 	var why string
-	if c > s.PriorHigh[i] && b.Volume >= p.BreakoutVolRatio*prevVolAvg {
+	allowBO, allowPB := p.Setups != "pullback", p.Setups != "breakout"
+	if allowBO && c > s.PriorHigh[i] && b.Volume >= p.BreakoutVolRatio*prevVolAvg {
 		kind = models.SetupBreakout
 		why = fmt.Sprintf("close %.2f > %d-day high %.2f on %.1f× volume", c, p.BreakoutLookback, s.PriorHigh[i], b.Volume/prevVolAvg)
-	} else {
+	} else if allowPB {
 		touched := false
 		for k := i - p.PullbackLookback + 1; k <= i; k++ {
 			if s.Bars[k].Low <= s.EMAFast[k]*(1+indicators.Pct(p.PullbackTolPct)) {
@@ -150,6 +177,16 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 	}
 	if kind == "" {
 		return models.Signal{}, false, "uptrend, but no breakout or pullback setup today"
+	}
+	switch p.HAEntry {
+	case "green", "strong":
+		if !s.HAGreen(i) {
+			return models.Signal{}, false, string(kind) + " setup, but the Heikin-Ashi candle is not green"
+		}
+		if lw, _ := s.haWick(i); p.HAEntry == "strong" && lw > st.wickPct() {
+			return models.Signal{}, false, fmt.Sprintf("%s setup, but the Heikin-Ashi candle has a %.0f%% lower wick (not a strong candle)", kind, lw)
+		}
+		why += "; Heikin-Ashi confirms"
 	}
 	stop := st.InitialStop(c, atr)
 	rs := st.RelativeStrength(s, i, idx, j)
@@ -213,8 +250,42 @@ func (st *Strategy) Manage(pos *models.Position, s *Series, i int) string {
 		return fmt.Sprintf("close %.2f at/below the stop %.2f", c, pos.Stop)
 	case p.ExitBelowEMAFast && pos.Stage != models.StageInitial && c < s.EMAFast[i]:
 		return fmt.Sprintf("close %.2f below EMA%d %.2f after breakeven", c, p.EMAFast, s.EMAFast[i])
+	case (p.HAExitAlways || pos.Stage != models.StageInitial) && st.haExit(s, i) != "":
+		return st.haExit(s, i)
 	case p.MaxHoldBars > 0 && pos.BarsHeld >= p.MaxHoldBars && pos.HighestClose < pos.EntryPrice+p.TimeStopMinR*R:
 		return fmt.Sprintf("time stop: %d days without reaching +%.1fR", pos.BarsHeld, p.TimeStopMinR)
+	}
+	return ""
+}
+
+func (st *Strategy) wickPct() float64 {
+	if st.P.HAWickPct <= 0 {
+		return 10
+	}
+	return st.P.HAWickPct
+}
+
+// haExit returns a reason when the Heikin-Ashi trend has turned down at bar i.
+func (st *Strategy) haExit(s *Series, i int) string {
+	switch st.P.HAExit {
+	case "red":
+		n := st.P.HAExitBars
+		if n < 1 {
+			n = 2
+		}
+		if i+1 < n {
+			return ""
+		}
+		for k := i - n + 1; k <= i; k++ {
+			if !s.HARed(k) {
+				return ""
+			}
+		}
+		return fmt.Sprintf("Heikin-Ashi turned down: %d red candles in a row", n)
+	case "strong_red":
+		if _, uw := s.haWick(i); s.HARed(i) && uw <= st.wickPct() {
+			return "Heikin-Ashi strong red candle (no upper wick)"
+		}
 	}
 	return ""
 }

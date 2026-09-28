@@ -289,9 +289,40 @@ func (e *Engine) morning(ctx context.Context, d *dayCtx) error {
 	})
 }
 
+// drawdownPaused applies the drawdown circuit breaker. A fall of
+// drawdown_pause_pct from the equity peak pauses new entries for
+// drawdown_pause_days trading days; afterwards the peak is reset to current
+// equity so the engine resumes (a pause keyed only on "equity below peak"
+// would never lift once positions are flat).
+func (e *Engine) drawdownPaused(today time.Time, snap swing.State) bool {
+	dd := e.cfg.Risk.DrawdownPausePct
+	if dd <= 0 {
+		return false
+	}
+	key := swing.DateKey(today)
+	if snap.PauseUntil != "" {
+		if key < snap.PauseUntil {
+			e.log.Warn("drawdown pause active — no new entries", "until", snap.PauseUntil, "equity", round2(snap.Equity()), "peak", round2(snap.PeakEquity))
+			return true
+		}
+		_ = e.store.Update(func(s *swing.State) { s.PauseUntil = ""; s.PeakEquity = s.Equity() })
+		e.log.Info("drawdown pause over — peak reset, entries resume", "equity", round2(snap.Equity()))
+		return false
+	}
+	if snap.Equity() < snap.PeakEquity*(1-indicators.Pct(dd)) {
+		until := today
+		for n := 0; n < e.cfg.Risk.PauseDays(); n++ {
+			until = e.sess.NextTradingDay(until)
+		}
+		_ = e.store.Update(func(s *swing.State) { s.PauseUntil = swing.DateKey(until) })
+		e.log.Warn("drawdown pause started — no new entries", "until", swing.DateKey(until), "equity", round2(snap.Equity()), "peak", round2(snap.PeakEquity))
+		return true
+	}
+	return false
+}
+
 func (e *Engine) enter(ctx context.Context, d *dayCtx, snap swing.State, qs map[string]models.Quote) {
-	if dd := e.cfg.Risk.DrawdownPausePct; dd > 0 && snap.Equity() < snap.PeakEquity*(1-indicators.Pct(dd)) {
-		e.log.Warn("drawdown pause active — no new entries", "equity", round2(snap.Equity()), "peak", round2(snap.PeakEquity))
+	if e.drawdownPaused(d.day, snap) {
 		return
 	}
 	brokerCash, err := d.trader.AvailableCash(ctx)

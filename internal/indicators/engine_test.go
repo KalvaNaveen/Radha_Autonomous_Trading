@@ -44,3 +44,16 @@ func TestRoundToTick(t *testing.T) {
 		t.Fatal("round")
 	}
 }
+
+func TestHeikinAshi(t *testing.T) {
+	o := []float64{10, 11}
+	h := []float64{12, 13}
+	l := []float64{9, 10}
+	c := []float64{11, 12}
+	hO, hH, hL, hC := HeikinAshi(o, h, l, c)
+	// bar0: close (10+12+9+11)/4=10.5, open (10+11)/2=10.5
+	// bar1: close (11+13+10+12)/4=11.5, open (10.5+10.5)/2=10.5
+	if !near(hC[0], 10.5) || !near(hO[0], 10.5) || !near(hC[1], 11.5) || !near(hO[1], 10.5) || hH[1] != 13 || !near(hL[1], 10) {
+		t.Fatalf("ha %v %v %v %v", hO, hH, hL, hC)
+	}
+}

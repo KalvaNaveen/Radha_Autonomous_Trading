@@ -39,7 +39,7 @@ strategy:             # daily candles
   pullback_tolerance_pct: 1.0
   pullback_volume_ratio: 1.0     # …then closed above yesterday's high on ≥ average volume
   slope_lookback: 5              # the 50 EMA must be rising
-  stop_atr_mult: 2.0             # initial stop = entry − 2 × ATR…
+  stop_atr_mult: 3.0             # initial stop = entry − 3 × ATR…
   min_stop_pct: 3                # …clamped to 3%–8% below entry
   max_stop_pct: 8
   breakeven_r: 1.0               # at +1R: stop → entry + costs
@@ -53,6 +53,14 @@ strategy:             # daily candles
   max_gap_up_pct: 2.0            # skip an entry that opens > 2% above the signal close
   rs_lookback: 60                # rank candidates by 60-day return vs the index
   cooldown_bars: 5               # days to wait before re-entering a stock after an exit
+  setups: breakout               # breakout | pullback | both (5-yr study: pullbacks were break-even at best)
+  regime_mode: basic             # basic: NIFTY > rising 50 EMA · strict: also NIFTY > 20 EMA > 50 EMA
+  # Heikin-Ashi filters — smoothed candles used for signals only (orders and stops use real prices).
+  ha_entry: green                # off | green (signal day's HA candle green) | strong (green, no lower wick)
+  ha_exit: red                   # off | red (N red HA candles in a row) | strong_red (red, no upper wick)
+  ha_exit_bars: 2                # N for ha_exit: red
+  ha_exit_always: false          # true: HA exit also before breakeven; false: only once the stop is at breakeven
+  ha_wick_pct: 10                # a wick up to this % of the HA candle's range counts as "no wick"
 
 risk:
   capital: 100000                # ₹ the engine may deploy (paper: starting cash)
@@ -60,7 +68,8 @@ risk:
   max_position_pct: 20           # at most 20% of equity in one stock
   max_positions: 5
   max_new_per_day: 2
-  drawdown_pause_pct: 15         # no new entries while equity is 15% below its peak
+  drawdown_pause_pct: 15         # equity 15% below its peak pauses new entries…
+  drawdown_pause_days: 20        # …for 20 trading days; then the peak resets to current equity and trading resumes
 
 costs:                           # Zerodha equity delivery (zerodha.com/charges)
   brokerage_pct: 0

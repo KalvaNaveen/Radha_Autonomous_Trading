@@ -219,7 +219,7 @@ function renderKPIs(){const p=S.portfolio,c=S.config;const ret=(p.equity/c.capit
   ['Realized P&L',inr(p.realized),sgn(p.realized),''],['Positions',`${(p.positions||[]).length} / ${c.max_positions}`,'',`risk ${c.risk_per_trade_pct}% per trade`],
   ['Drawdown',`${num(p.drawdown_pct)}%`,p.drawdown_pct>10?'neg':'',`peak ${inr(p.peak)}`]];
  $('#kpis').innerHTML=k.map(([l,v,cl,s])=>`<div class="kpi"><div class="l">${l}</div><div class="v ${cl}">${v}</div>${s?`<div class="s">${s}</div>`:''}</div>`).join('')}
-const STAGE_TXT={INITIAL:'initial (−2 ATR)',BREAKEVEN:'breakeven',LOCKED:'+1R locked',TRAILING:'trailing'};
+const STAGE_TXT={INITIAL:'initial',BREAKEVEN:'breakeven',LOCKED:'+1R locked',TRAILING:'trailing'};
 function renderPositions(){const ps=S.portfolio.positions||[];
  $('#positions').innerHTML=ps.map(p=>`<tr><td><b>${esc(p.symbol)}</b></td><td>${esc(p.setup)}</td><td class="num">${p.qty}</td><td>${fdate(p.entry_date)} <span class="muted">(${p.bars_held}d)</span></td>
   <td class="num">${num(p.entry_price)}</td><td class="num">${num(p.last_price)}</td><td class="num ${sgn(p.pnl)}">${num(p.pnl)}</td><td class="num ${sgn(p.pnl_pct)}">${num(p.pnl_pct)}%</td>

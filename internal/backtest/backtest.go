@@ -107,6 +107,7 @@ func Run(in Input) Result {
 
 	cash := cfg.Risk.Capital
 	peak := cash
+	pauseUntil := 0 // index bar before which entries are paused (drawdown breaker)
 	positions := map[string]*models.Position{}
 	cooldown := map[string]int{} // symbol → index-bar number when re-entry is allowed
 	var pending []models.Signal
@@ -226,7 +227,18 @@ func Run(in Input) Result {
 
 		j, _ := idx.IndexOn(d)
 		regime := !cfg.Market.RegimeFilter || st.RegimeOK(idx, j)
-		paused := cfg.Risk.DrawdownPausePct > 0 && equity < peak*(1-indicators.Pct(cfg.Risk.DrawdownPausePct))
+		paused := false
+		if cfg.Risk.DrawdownPausePct > 0 {
+			switch {
+			case pauseUntil > 0 && k < pauseUntil:
+				paused = true
+			case pauseUntil > 0:
+				pauseUntil, peak = 0, equity // pause over: reset the peak and resume
+			case equity < peak*(1-indicators.Pct(cfg.Risk.DrawdownPausePct)):
+				pauseUntil, paused = k+cfg.Risk.PauseDays(), true
+				res.Skipped["drawdown pauses"]++
+			}
+		}
 		if regime && !paused {
 			for _, x := range insts {
 				if _, held := positions[x.Symbol]; held || cooldown[x.Symbol] > k {

@@ -124,3 +124,52 @@ func TestDeliveryCosts(t *testing.T) {
 		t.Fatalf("costs buy %.2f sell %.2f", buy, sell)
 	}
 }
+
+func TestHeikinAshiEntryFilter(t *testing.T) {
+	c := cfg()
+	c.Strategy.HAEntry = "green"
+	st := NewStrategy(c.Strategy, c.Costs)
+	b := bars(uptrend(120, 500, 1), 1e6)
+	last := len(b) - 1
+	// A breakout close, but the candle itself opened high and sold off hard
+	// after a string of red days → the HA candle stays red.
+	for k := last - 4; k < last; k++ {
+		b[k].Open, b[k].Close = b[k].Close*1.02, b[k].Close*0.99
+	}
+	b[last].Open, b[last].High, b[last].Low = 540, 650, 480
+	b[last].Close = b[last-1].Close * 1.03
+	b[last].Volume = 2e6
+	s := NewSeries(b, c.Strategy)
+	if s.HAGreen(last) {
+		t.Skip("fixture did not produce a red HA candle")
+	}
+	if _, ok, why := st.Evaluate("X", 1, s, last, nil, 0); ok {
+		t.Fatalf("red Heikin-Ashi candle must block the entry (%s)", why)
+	}
+	c.Strategy.HAEntry = "off"
+	if _, ok, why := NewStrategy(c.Strategy, c.Costs).Evaluate("X", 1, s, last, nil, 0); !ok {
+		t.Fatalf("without the filter the breakout should be taken: %s", why)
+	}
+}
+
+func TestHeikinAshiExit(t *testing.T) {
+	c := cfg()
+	c.Strategy.ExitBelowEMAFast = false
+	st := NewStrategy(c.Strategy, c.Costs)
+	cl := uptrend(120, 500, 1)
+	for k := 116; k < 120; k++ { // four falling days at the end
+		cl[k] = cl[k-1] - 2
+	}
+	s := NewSeries(bars(cl, 1e6), c.Strategy)
+	if !s.HARed(118) || !s.HARed(119) {
+		t.Fatal("fixture: expected red HA candles")
+	}
+	pos := &models.Position{EntryPrice: 400, InitialStop: 380, Stop: 401, Stage: models.StageBreakeven, HighestClose: 620, Quantity: 1}
+	if r := st.Manage(pos, s, 119); r == "" {
+		t.Fatal("2 red Heikin-Ashi candles after breakeven must exit")
+	}
+	pos = &models.Position{EntryPrice: 600, InitialStop: 560, Stop: 560, Stage: models.StageInitial, HighestClose: 600, Quantity: 1}
+	if r := st.Manage(pos, s, 119); r != "" {
+		t.Fatalf("before breakeven the HA exit is off by default, got %q", r)
+	}
+}

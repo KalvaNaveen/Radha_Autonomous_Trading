@@ -101,3 +101,26 @@ func RoundToTick(p, tick float64, dir int) float64 {
 
 // Pct converts a percentage (2.5) to a fraction (0.025).
 func Pct(p float64) float64 { return p / 100 }
+
+// HeikinAshi returns smoothed candles computed from real OHLC:
+//
+//	HAClose = (O+H+L+C)/4
+//	HAOpen  = (prev HAOpen + prev HAClose)/2   (first bar: (O+C)/2)
+//	HAHigh  = max(H, HAOpen, HAClose),  HALow = min(L, HAOpen, HAClose)
+//
+// The prices are synthetic — use them for signals only, never for orders.
+func HeikinAshi(o, h, l, c []float64) (hO, hH, hL, hC []float64) {
+	n := len(c)
+	hO, hH, hL, hC = make([]float64, n), make([]float64, n), make([]float64, n), make([]float64, n)
+	for i := 0; i < n; i++ {
+		hC[i] = (o[i] + h[i] + l[i] + c[i]) / 4
+		if i == 0 {
+			hO[i] = (o[i] + c[i]) / 2
+		} else {
+			hO[i] = (hO[i-1] + hC[i-1]) / 2
+		}
+		hH[i] = math.Max(h[i], math.Max(hO[i], hC[i]))
+		hL[i] = math.Min(l[i], math.Min(hO[i], hC[i]))
+	}
+	return
+}

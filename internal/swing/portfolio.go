@@ -28,6 +28,7 @@ type State struct {
 	LastEvening string                      `json:"last_evening"` // date of the last completed evening run
 	LastMorning string                      `json:"last_morning"`
 	Regime      string                      `json:"regime"`
+	PauseUntil  string                      `json:"pause_until,omitempty"` // drawdown pause: no entries before this date
 	UpdatedAt   time.Time                   `json:"updated_at"`
 }
 
