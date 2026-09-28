@@ -99,6 +99,16 @@ costs:                           # Zerodha equity delivery (zerodha.com/charges)
   dp_per_sell: 15.34             # per stock, on each day you sell
   slippage_pct: 0.10             # assumed per side (backtest and paper fills)
 
+mtf:                             # Margin Trading Facility — BACKTEST ONLY for now (the engine refuses to start with it on)
+  enabled: false
+  leverage: 2                    # 2 = you pay 50%, Zerodha lends 50% (Zerodha allows up to 4–5× by stock)
+  borrow_only_shortfall: true    # pay with cash first; borrow only when cash is short
+  interest_pct_per_day: 0.04     # ₹40 per lakh borrowed per calendar day, from T+1 (≈14.6% a year)
+  brokerage_pct: 0.3             # MTF brokerage: 0.3% per order…
+  brokerage_max: 20              # …capped at ₹20 (+GST); CNC delivery is free
+  pledge_fee: 15                 # ₹15 + GST per stock per buy day (auto-pledge)
+  unpledge_fee: 15               # ₹15 + GST per stock when sold
+
 orders:
   max_ops: 8                     # SEBI registration threshold is 10 orders/second
   max_per_minute: 200

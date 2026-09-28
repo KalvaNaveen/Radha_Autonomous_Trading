@@ -217,6 +217,50 @@ func main() {
 		add("1+3 HA green entry + 3 red exit", func(s *config.StrategyConfig) { s.HAEntry, s.HAExit, s.HAExitBars = "green", "red", 3 })
 		add("2+3 HA EMA/ST + 3 red exit", func(s *config.StrategyConfig) { s.CrossSource, s.HAExit, s.HAExitBars = "ha", "red", 3 })
 	}
+	if *grid == "mtf" {
+		type mv struct {
+			name string
+			f    func(c *config.Config)
+		}
+		on := func(c *config.Config, lev, capPct, risk float64, pos int) {
+			c.MTF.Enabled, c.MTF.Leverage, c.MTF.BorrowOnlyShortfall = true, lev, false
+			c.Risk.MaxPositionPct, c.Risk.RiskPerTradePct, c.Risk.MaxPositions = capPct, risk, pos
+		}
+		mvs := []mv{
+			{"CNC (current: no borrowing)", func(*config.Config) {}},
+			{"MTF 2x on every buy, same sizing", func(c *config.Config) { on(c, 2, 20, 1, 5) }},
+			{"MTF 2x only for the shortfall, 8 positions of 20%", func(c *config.Config) { on(c, 2, 20, 1, 8); c.MTF.BorrowOnlyShortfall = true }},
+			{"MTF 2x only for the shortfall, 10 positions of 20%", func(c *config.Config) { on(c, 2, 20, 1, 10); c.MTF.BorrowOnlyShortfall = true }},
+			{"MTF 2x only for the shortfall, 5 x 30%, risk 1.5%", func(c *config.Config) { on(c, 2, 30, 1.5, 5); c.MTF.BorrowOnlyShortfall = true }},
+			{"CNC, 5 x 30%, risk 1.5% (same sizing, no loan)", func(c *config.Config) { c.Risk.MaxPositionPct, c.Risk.RiskPerTradePct = 30, 1.5 }},
+			{"MTF shortfall, 5 x 25%, risk 1.25%", func(c *config.Config) { on(c, 2, 25, 1.25, 5); c.MTF.BorrowOnlyShortfall = true }},
+			{"MTF shortfall, 5 x 35%, risk 1.75%", func(c *config.Config) { on(c, 2, 35, 1.75, 5); c.MTF.BorrowOnlyShortfall = true }},
+			{"MTF shortfall, 5 x 30%, risk 1.5%, interest 0.05%/day", func(c *config.Config) {
+				on(c, 2, 30, 1.5, 5)
+				c.MTF.BorrowOnlyShortfall, c.MTF.InterestPctPerDay = true, 0.05
+			}},
+			{"MTF 2x, 10 positions of 20%", func(c *config.Config) { on(c, 2, 20, 1, 10) }},
+			{"MTF 2x, 5 positions of 40%, risk 2%", func(c *config.Config) { on(c, 2, 40, 2, 5) }},
+			{"MTF 1.5x, 5 positions of 30%, risk 1.5%", func(c *config.Config) { on(c, 1.5, 30, 1.5, 5) }},
+			{"MTF 3x, 5 positions of 60%, risk 3%", func(c *config.Config) { on(c, 3, 60, 3, 5) }},
+			{"MTF 2x, 5 x 40%, risk 2% — if interest were 0", func(c *config.Config) { on(c, 2, 40, 2, 5); c.MTF.InterestPctPerDay = 0 }},
+		}
+		fmt.Printf("%-52s | %8s %6s %5s %5s | %9s %9s | %7s %7s | %6s\n", "variant", "return%", "maxDD%", "PF", "trd", "charges₹", "MTF₹", "H1 ret%", "H2 ret%", "ret/DD")
+		fmt.Println(strings.Repeat("-", 124))
+		for _, v := range mvs {
+			c := cfg
+			v.f(&c)
+			if err := c.Validate(); err != nil {
+				fail(err)
+			}
+			in.From, in.To, in.Config = from, to, c
+			r := backtest.Run(in)
+			f := r.Summary
+			h1, h2 := run(in, c, from, mid), run(in, c, mid, to)
+			fmt.Printf("%-52s | %8.1f %6.1f %5.2f %5d | %9.0f %9.0f | %7.1f %7.1f | %6.2f\n", v.name, f.TotalReturnPct, f.MaxDrawdownPct, f.ProfitFactor, f.Trades, f.TotalCosts, r.MTFCosts, h1.TotalReturnPct, h2.TotalReturnPct, f.TotalReturnPct/f.MaxDrawdownPct)
+		}
+		return
+	}
 	if *grid == "portfolio" {
 		vs = []variant{{"current (1% risk, 5 pos, 20% cap, 2 new/day, regime on)", func(*config.StrategyConfig) {}}}
 		// Risk/market settings live outside StrategyConfig; carry them via closures on cfg copies.

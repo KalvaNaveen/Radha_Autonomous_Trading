@@ -93,6 +93,8 @@ Also available (all tested, none adopted — see below): `stop_mode: supertrend 
 
 **Market filter and portfolio** (same study): the strict market filter returned +28.4% (max DD 10.6%, PF 1.79, +12.4% / +6.2% by half) against +14.9% for the basic one, and stayed at +26–28.5% with 5, 6 or 7 positions. Switching the filter off lost 9.4%. More positions (8–10) looked better only in the first half; risk above 1% per trade lowered both return and return/drawdown.
 
+**MTF (Margin Trading Facility)** — modelled in the backtester only (`mtf:` in the config; the engine refuses to start with it on): borrowed amount, 0.04%/day interest on calendar days, MTF brokerage (0.3%, max ₹20 + GST per order) and pledge/unpledge fees. On the same data every MTF variant did worse than paying cash: borrowing 2× on every buy +7.1%; borrowing only the shortfall with 5 positions of 30% +44.4%, while the same sizing paid in cash returned +52.1%. Borrowing at ≈14.6% a year costs more than this strategy earns on the extra money.
+
 **Stops, trailing and targets** (same study, on top of the EMA-cross rules): every trailing stop made results worse — the EMA10/20 cross-down already works as a trailing exit, and a tighter trail only cut winners short. Profit targets were unstable (+4R: +5.7%, +5R: +15.3%, +6R: +17.6%, +8R: +13.3%), which is noise, not an edge. Breakeven at +1.5R was neutral over 5 years (+14.9% vs +15.0%) and better in 2024–26 (+4.3% vs +2.3%), so it is on for capital protection.
 
 NIFTY 50 returned +28% over the same period. The EMA-cross rules are the first set that made money in both halves, but ~110 trades on 25 stocks is a small sample: widen the universe and re-run the study before trading real capital.

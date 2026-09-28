@@ -125,3 +125,38 @@ func TestGapThroughStopFillsAtOpen(t *testing.T) {
 		t.Fatalf("expected a gap-through-stop exit, trades: %+v", res.Trades)
 	}
 }
+
+// With MTF at 1× nothing changes; at 2× the engine borrows, pays interest
+// and fees, and every rupee of debt is repaid by the end.
+func TestMTFAccounting(t *testing.T) {
+	in := mtfInput()
+	base := Run(in)
+	in.Config.MTF.Enabled, in.Config.MTF.Leverage = true, 1
+	if one := Run(in); one.Summary.EndEquity != base.Summary.EndEquity {
+		t.Fatalf("1× MTF must equal CNC: %.2f vs %.2f", one.Summary.EndEquity, base.Summary.EndEquity)
+	}
+	in.Config.MTF.Leverage = 2
+	in.Config.Risk.MaxPositionPct = 40
+	lev := Run(in)
+	if lev.Summary.Trades == 0 || lev.MTFCosts <= 0 {
+		t.Fatalf("2× MTF must trade and pay MTF costs: trades %d costs %.2f", lev.Summary.Trades, lev.MTFCosts)
+	}
+	in.Config.MTF.InterestPctPerDay, in.Config.MTF.BrokeragePct, in.Config.MTF.PledgeFee, in.Config.MTF.UnpledgeFee = 0, 0, 0, 0
+	free := Run(in)
+	if free.Summary.EndEquity <= lev.Summary.EndEquity {
+		t.Fatalf("removing MTF costs must raise the result: %.2f vs %.2f", free.Summary.EndEquity, lev.Summary.EndEquity)
+	}
+}
+
+func mtfInput() Input {
+	cfg := config.Defaults()
+	cfg.Strategy.Setups, cfg.Strategy.FixedStop, cfg.Strategy.ExitOnEMACross = "breakout", false, false
+	cfg.Strategy.ExitBelowEMAFast, cfg.Strategy.MaxHoldBars, cfg.Strategy.HAEntry = true, 40, "off"
+	var ins []Instrument
+	for i := 0; i < 12; i++ {
+		ins = append(ins, Instrument{Symbol: string(rune('A' + i)), Token: uint32(i + 1),
+			Bars: synth(int64(i+7), 900, 300+50*float64(i), 0.0006, 0.018)})
+	}
+	idx := synth(99, 900, 15000, 0.0004, 0.009)
+	return Input{Instruments: ins, Index: idx, From: idx[120].Date, To: idx[len(idx)-1].Date, Config: cfg}
+}

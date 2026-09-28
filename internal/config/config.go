@@ -23,6 +23,7 @@ type Config struct {
 	Strategy StrategyConfig `yaml:"strategy"`
 	Risk     RiskConfig     `yaml:"risk"`
 	Costs    CostsConfig    `yaml:"costs"`
+	MTF      MTFConfig      `yaml:"mtf"`
 	Orders   OrdersConfig   `yaml:"orders"`
 	Market   MarketConfig   `yaml:"market"`
 	Backtest BacktestConfig `yaml:"backtest"`
@@ -147,6 +148,19 @@ type CostsConfig struct {
 	SlippagePct  float64 `yaml:"slippage_pct"`   // backtest/paper fill slippage per side
 }
 
+// MTFConfig models Zerodha's Margin Trading Facility (buy with borrowed
+// money on approved stocks). Backtest-only for now.
+type MTFConfig struct {
+	Enabled             bool    `yaml:"enabled"`
+	Leverage            float64 `yaml:"leverage"`              // 2 = you fund 50%, Zerodha lends 50% (max 4–5× by stock)
+	BorrowOnlyShortfall bool    `yaml:"borrow_only_shortfall"` // true: pay cash first, borrow only what is missing
+	InterestPctPerDay   float64 `yaml:"interest_pct_per_day"`  // 0.04 (₹40 per lakh per day, from T+1, calendar days)
+	BrokeragePct        float64 `yaml:"brokerage_pct"`         // 0.3% per order…
+	BrokerageMax        float64 `yaml:"brokerage_max"`         // …capped at ₹20
+	PledgeFee           float64 `yaml:"pledge_fee"`            // ₹15 + GST per stock per buy day
+	UnpledgeFee         float64 `yaml:"unpledge_fee"`          // ₹15 + GST per stock per sell
+}
+
 // OrdersConfig holds order-manager parameters.
 type OrdersConfig struct {
 	MaxOPS              int           `yaml:"max_ops"`
@@ -210,6 +224,7 @@ func Defaults() Config {
 		},
 		Risk: RiskConfig{Capital: 100000, RiskPerTradePct: 1.0, MaxPositionPct: 20, MaxPositions: 5,
 			MaxNewPerDay: 2, DrawdownPausePct: 15, DrawdownPauseDays: 20},
+		MTF: MTFConfig{Enabled: false, Leverage: 2, InterestPctPerDay: 0.04, BrokeragePct: 0.3, BrokerageMax: 20, PledgeFee: 15, UnpledgeFee: 15},
 		Costs: CostsConfig{BrokeragePct: 0, STTPct: 0.1, StampBuyPct: 0.015, ExchangePct: 0.00307,
 			SEBIPerCrore: 10, GSTPct: 18, DPPerSell: 15.34, SlippagePct: 0.10},
 		Orders: OrdersConfig{MaxOPS: 8, MaxPerMinute: 200, MaxPerDay: 2000, EmergencyReserve: 100, Workers: 4,
@@ -300,6 +315,9 @@ func (c Config) Validate() error {
 	r := c.Risk
 	if r.Capital <= 0 || r.RiskPerTradePct <= 0 || r.RiskPerTradePct > 5 || r.MaxPositions < 1 || r.MaxPositionPct <= 0 || r.MaxPositionPct > 100 {
 		add("risk: capital > 0, 0 < risk_per_trade_pct <= 5, max_positions >= 1, 0 < max_position_pct <= 100")
+	}
+	if c.MTF.Enabled && (c.MTF.Leverage < 1 || c.MTF.Leverage > 5) {
+		add("mtf.leverage must be between 1 and 5")
 	}
 	if c.Orders.MaxOPS < 1 || c.Orders.MaxOPS >= 10 {
 		add("orders.max_ops must be 1..9 (SEBI registration threshold is 10 OPS)")

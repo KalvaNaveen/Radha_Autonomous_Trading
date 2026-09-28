@@ -83,13 +83,14 @@ type Summary struct {
 
 // Result is the full output of a run.
 type Result struct {
-	Summary Summary        `json:"summary"`
-	Trades  []models.Trade `json:"trades"`
-	Equity  []EquityPoint  `json:"equity"`
-	Config  config.Config  `json:"-"`
-	Skipped map[string]int `json:"skipped_reasons"`
-	Rules   string         `json:"rules"`      // human summary of the rules used
-	RulesID string         `json:"rules_hash"` // RulesHash of the config used
+	Summary  Summary        `json:"summary"`
+	Trades   []models.Trade `json:"trades"`
+	Equity   []EquityPoint  `json:"equity"`
+	Config   config.Config  `json:"-"`
+	Skipped  map[string]int `json:"skipped_reasons"`
+	MTFCosts float64        `json:"mtf_costs"`  // interest + MTF brokerage + pledge fees
+	Rules    string         `json:"rules"`      // human summary of the rules used
+	RulesID  string         `json:"rules_hash"` // RulesHash of the config used
 }
 
 // RulesHash fingerprints the settings that change backtest results
@@ -100,7 +101,8 @@ func RulesHash(c config.Config) string {
 		R config.RiskConfig
 		C config.CostsConfig
 		M config.MarketConfig
-	}{c.Strategy, c.Risk, c.Costs, c.Market})
+		F config.MTFConfig
+	}{c.Strategy, c.Risk, c.Costs, c.Market, c.MTF})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:8])
 }
@@ -164,6 +166,9 @@ func DescribeRules(c config.Config) string {
 		parts = append(parts, "exit "+strings.Join(exits, ", "))
 	}
 	parts = append(parts, fmt.Sprintf("risk %g%%/trade, max %d positions", c.Risk.RiskPerTradePct, c.Risk.MaxPositions))
+	if c.MTF.Enabled && c.MTF.Leverage > 1 {
+		parts = append(parts, fmt.Sprintf("MTF %g× at %g%%/day", c.MTF.Leverage, c.MTF.InterestPctPerDay))
+	}
 	return strings.Join(parts, " · ")
 }
 
@@ -197,9 +202,44 @@ func Run(in Input) Result {
 	var benchBase float64
 	exposedDays, days := 0, 0
 
+	// MTF: borrowed amount and extra MTF charges (interest, brokerage,
+	// pledge) per open position.
+	mtf := cfg.MTF
+	lev := 1.0
+	if mtf.Enabled && mtf.Leverage > 1 {
+		lev = mtf.Leverage
+	}
+	gst := 1 + indicators.Pct(cfg.Costs.GSTPct)
+	mtfBrokerage := func(v float64) float64 { return math.Min(v*indicators.Pct(mtf.BrokeragePct), mtf.BrokerageMax) * gst }
+	debt := map[string]float64{}
+	extra := map[string]float64{}
+	totalDebt := func() float64 {
+		var t float64
+		for _, v := range debt {
+			t += v
+		}
+		return t
+	}
+	equityNow := func() float64 { return cash + markValue(positions) - totalDebt() }
+	var prevDay time.Time
+
 	sell := func(p *models.Position, px float64, d time.Time, reason string, k int) {
 		t := swing.CloseTrade(p, px, d, reason, st.Costs)
-		cash += px*float64(p.Quantity) - (t.Costs - p.EntryCosts)
+		proceeds := px*float64(p.Quantity) - (t.Costs - p.EntryCosts)
+		if b, ok := debt[p.Symbol]; ok {
+			fee := mtfBrokerage(px*float64(p.Quantity)) + mtf.UnpledgeFee*gst
+			proceeds -= b + fee
+			extra[p.Symbol] += fee
+			t.Costs += extra[p.Symbol]
+			t.Net -= extra[p.Symbol]
+			if risk := p.RiskPerShare() * float64(p.Quantity); risk > 0 {
+				t.RMultiple = t.Net / risk
+			}
+			res.MTFCosts += extra[p.Symbol]
+			delete(debt, p.Symbol)
+			delete(extra, p.Symbol)
+		}
+		cash += proceeds
 		res.Trades = append(res.Trades, t)
 		delete(positions, p.Symbol)
 		cooldown[p.Symbol] = k + cfg.Strategy.CooldownBars
@@ -218,6 +258,16 @@ func Run(in Input) Result {
 			benchBase = ib.Close
 		}
 		days++
+		// MTF interest for the calendar days since the previous session.
+		if !prevDay.IsZero() && len(debt) > 0 {
+			nd := math.Round(d.Sub(prevDay).Hours() / 24)
+			for sym, b := range debt {
+				in := b * indicators.Pct(mtf.InterestPctPerDay) * nd
+				cash -= in
+				extra[sym] += in
+			}
+		}
+		prevDay = d
 
 		// 1. OPEN — planned exits, then entries.
 		for _, p := range sortedPositions(positions) {
@@ -229,7 +279,7 @@ func Run(in Input) Result {
 				sell(p, x.s.Bars[i].Open*(1-slip), d, p.PendingExit, k)
 			}
 		}
-		equityPrev := cash + markValue(positions)
+		equityPrev := equityNow()
 		newToday := 0
 		for _, sig := range pending {
 			if len(positions) >= cfg.Risk.MaxPositions || newToday >= cfg.Risk.MaxNewPerDay {
@@ -255,13 +305,37 @@ func Run(in Input) Result {
 				continue
 			}
 			fill := o * (1 + slip)
-			qty := swing.Size(equityPrev, cash, fill, sig.Stop, cfg.Risk, st.Costs)
+			qty := swing.Size(equityPrev, cash*lev, fill, sig.Stop, cfg.Risk, st.Costs)
+			var own, fee float64
+			for ; qty >= 1; qty-- { // own share of the cost must fit the cash
+				v := fill * float64(qty)
+				own, fee = v, 0
+				if lev > 1 {
+					bc := st.Costs.Buy(v)
+					if mtf.BorrowOnlyShortfall && v+bc <= cash {
+						own, fee = v, 0 // enough cash: a normal CNC buy
+					} else {
+						fee = mtfBrokerage(v) + mtf.PledgeFee*gst
+						own = v / lev
+						if mtf.BorrowOnlyShortfall {
+							own = math.Max(own, math.Min(v, cash-bc-fee))
+						}
+					}
+				}
+				if own+st.Costs.Buy(v)+fee <= cash {
+					break
+				}
+			}
 			if qty < 1 {
 				res.Skipped["size zero (cash/risk)"]++
 				continue
 			}
 			bc := st.Costs.Buy(fill * float64(qty))
-			cash -= fill*float64(qty) + bc
+			cash -= own + bc + fee
+			if lev > 1 && fill*float64(qty)-own > 0.01 {
+				debt[sig.Symbol] = fill*float64(qty) - own
+				extra[sig.Symbol] = fee
+			}
 			positions[sig.Symbol] = &models.Position{InstrumentToken: x.Token, Symbol: x.Symbol, Quantity: qty,
 				EntryPrice: fill, EntryDate: d, Setup: sig.Setup, InitialStop: sig.Stop, Stop: sig.Stop,
 				Stage: models.StageInitial, HighestClose: fill, EntryCosts: bc}
@@ -297,6 +371,15 @@ func Run(in Input) Result {
 				booked.EntryCosts = p.EntryCosts * float64(part) / float64(p.Quantity)
 				t := swing.CloseTrade(&booked, px, d, fmt.Sprintf("partial %.0f%% at target +%.1fR", cfg.Strategy.PartialPct, cfg.Strategy.TargetR), st.Costs)
 				cash += px*float64(part) - (t.Costs - booked.EntryCosts)
+				if b, ok := debt[p.Symbol]; ok { // repay the loan share of the part sold
+					share := b * float64(part) / float64(p.Quantity)
+					fee := mtfBrokerage(px*float64(part)) + mtf.UnpledgeFee*gst
+					cash -= share + fee
+					debt[p.Symbol] -= share
+					t.Costs += fee
+					t.Net -= fee
+					res.MTFCosts += fee
+				}
 				res.Trades = append(res.Trades, t)
 				p.Quantity -= part
 				p.EntryCosts -= booked.EntryCosts
@@ -319,7 +402,7 @@ func Run(in Input) Result {
 				p.PendingExit = reason
 			}
 		}
-		equity := cash + markValue(positions)
+		equity := equityNow()
 		if equity > peak {
 			peak = equity
 		}
