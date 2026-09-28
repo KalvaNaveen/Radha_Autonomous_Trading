@@ -36,7 +36,7 @@ strategy:             # daily candles
   supertrend_period: 10          # …while Supertrend(10, 3) is green (TradingView's default)
   supertrend_mult: 3
   cross_trend_filter: false      # true: also require close > rising EMA50 (5-yr study: worse in 2024–26)
-  regime_mode: basic             # basic: NIFTY > rising 50 EMA · strict: also NIFTY > 20 EMA > 50 EMA
+  regime_mode: strict            # strict: NIFTY > 20 EMA > 50 EMA and the 50 EMA rising (5-yr study: +28% vs +15% for basic)
   ema_fast: 20                   # used by breakout/pullback and the trend filter
   ema_slow: 50
   atr_period: 14

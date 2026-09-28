@@ -201,7 +201,7 @@ func Defaults() Config {
 			BreakevenR: 1.0, LockR: 2.0, TrailATRMult: 3.0, ExitBelowEMAFast: false,
 			MaxHoldBars: 0, TimeStopMinR: 1.0,
 			MinPrice: 50, MinTurnoverCr: 10, MaxGapUpPct: 2.0, RSLookback: 60, CooldownBars: 5,
-			Setups: "ema_cross", RegimeMode: "basic",
+			Setups: "ema_cross", RegimeMode: "strict",
 			CrossFast: 10, CrossSlow: 20, SupertrendPeriod: 10, SupertrendMult: 3,
 			ExitOnEMACross: true, StopMode: "atr", FixedStop: true,
 			SwingLowBars: 10, BreakevenAtR: 1.5, TrailMode: "off", TrailStartR: 2, TargetR: 0, PartialPct: 100,

@@ -55,7 +55,7 @@ positions stay protected by their GTTs at Zerodha while it's off.
 - average daily turnover at least ₹10 crore;
 - for `breakout`/`pullback` (and for `ema_cross` with `cross_trend_filter: true`): close above the 50-day EMA, the 20-day EMA above the 50-day EMA, and the 50-day EMA rising over 5 sessions.
 
-**Market regime:** new entries are allowed only while NIFTY 50 closes above a rising 50-day EMA. Open positions are always managed.
+**Market regime** (`regime_mode: strict`): new entries are allowed only while NIFTY 50 closes above its 20-day EMA, the 20-day EMA is above the 50-day EMA, and the 50-day EMA is rising. Open positions are always managed.
 
 **Entry (default `setups: ema_cross`), on the completed daily candle:** EMA10 crosses above EMA20 while Supertrend(10, 3) is green. The entry is taken only on the day the combined condition turns true (whichever of the two happens last), and bought at the next morning run.
 
@@ -85,7 +85,10 @@ Also available (all tested, none adopted — see below): `stop_mode: supertrend 
 |---|---|---|---|---|---|
 | Original (breakout + pullback, ratcheting stop) | −15.5% | 27.7% | 0.81 | +7.0% | −25.9% |
 | Breakout + Heikin-Ashi | +2.8% | 14.7% | 1.05 | +13.8% | −6.1% |
-| **EMA10/20 cross + Supertrend, fixed 3×ATR stop** | **+15.0%** | **11.7%** | **1.37** | **+6.9%** | **+2.3%** |
+| EMA10/20 cross + Supertrend, fixed 3×ATR stop | +15.0% | 11.7% | 1.37 | +6.9% | +2.3% |
+| **…+ breakeven at +1.5R + strict market filter (current)** | **+28.4%** | **10.6%** | **1.79** | **+12.4%** | **+6.2%** |
+
+**Market filter and portfolio** (same study): the strict market filter returned +28.4% (max DD 10.6%, PF 1.79, +12.4% / +6.2% by half) against +14.9% for the basic one, and stayed at +26–28.5% with 5, 6 or 7 positions. Switching the filter off lost 9.4%. More positions (8–10) looked better only in the first half; risk above 1% per trade lowered both return and return/drawdown.
 
 **Stops, trailing and targets** (same study, on top of the EMA-cross rules): every trailing stop made results worse — the EMA10/20 cross-down already works as a trailing exit, and a tighter trail only cut winners short. Profit targets were unstable (+4R: +5.7%, +5R: +15.3%, +6R: +17.6%, +8R: +13.3%), which is noise, not an edge. Breakeven at +1.5R was neutral over 5 years (+14.9% vs +15.0%) and better in 2024–26 (+4.3% vs +2.3%), so it is on for capital protection.
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -201,6 +202,62 @@ func main() {
 			s.StopATRMult, s.BreakevenAtR, s.TargetR, s.PartialPct = 2.5, 1.5, 5, 100
 		})
 		add("2.0xATR + BE 1.5R", func(s *config.StrategyConfig) { s.StopATRMult, s.BreakevenAtR = 2, 1.5 })
+	}
+	if *grid == "portfolio" {
+		vs = []variant{{"current (1% risk, 5 pos, 20% cap, 2 new/day, regime on)", func(*config.StrategyConfig) {}}}
+		// Risk/market settings live outside StrategyConfig; carry them via closures on cfg copies.
+		type pv struct {
+			name string
+			f    func(c *config.Config)
+		}
+		pvs2 := []pv{}
+		for _, n := range []int{6, 7, 8, 10} {
+			for _, rg := range []string{"basic", "strict"} {
+				n, rg := n, rg
+				capPct := math.Round(100.0 / float64(n) * 1.2)
+				pvs2 = append(pvs2, pv{fmt.Sprintf("%d pos, %.0f%% cap, regime %s", n, capPct, rg), func(c *config.Config) {
+					c.Risk.MaxPositions, c.Risk.MaxPositionPct, c.Strategy.RegimeMode = n, capPct, rg
+				}})
+			}
+		}
+		pvs := []pv{
+			{"regime filter OFF", func(c *config.Config) { c.Market.RegimeFilter = false }},
+			{"regime strict", func(c *config.Config) { c.Strategy.RegimeMode = "strict" }},
+			{"risk 0.75%", func(c *config.Config) { c.Risk.RiskPerTradePct = 0.75 }},
+			{"risk 1.5%", func(c *config.Config) { c.Risk.RiskPerTradePct = 1.5 }},
+			{"risk 2%", func(c *config.Config) { c.Risk.RiskPerTradePct = 2 }},
+			{"8 positions, 15% cap", func(c *config.Config) { c.Risk.MaxPositions, c.Risk.MaxPositionPct = 8, 15 }},
+			{"10 positions, 12% cap", func(c *config.Config) { c.Risk.MaxPositions, c.Risk.MaxPositionPct = 10, 12 }},
+			{"8 pos, 15% cap, risk 1.5%", func(c *config.Config) {
+				c.Risk.MaxPositions, c.Risk.MaxPositionPct, c.Risk.RiskPerTradePct = 8, 15, 1.5
+			}},
+			{"5 pos, 25% cap", func(c *config.Config) { c.Risk.MaxPositionPct = 25 }},
+			{"3 new per day", func(c *config.Config) { c.Risk.MaxNewPerDay = 3 }},
+			{"cooldown 0", func(c *config.Config) { c.Strategy.CooldownBars = 0 }},
+			{"cooldown 10", func(c *config.Config) { c.Strategy.CooldownBars = 10 }},
+			{"max gap-up 1%", func(c *config.Config) { c.Strategy.MaxGapUpPct = 1 }},
+			{"max gap-up 4%", func(c *config.Config) { c.Strategy.MaxGapUpPct = 4 }},
+			{"RS lookback 20", func(c *config.Config) { c.Strategy.RSLookback = 20 }},
+			{"RS lookback 120", func(c *config.Config) { c.Strategy.RSLookback = 120 }},
+			{"min turnover 50 cr", func(c *config.Config) { c.Strategy.MinTurnoverCr = 50 }},
+		}
+		fmt.Printf("%-62s | %8s %6s %5s %5s %6s %6s | %7s %5s | %7s %5s | %5s\n", "variant", "return%", "maxDD%", "PF", "trd", "win%", "expo%", "H1 ret%", "H1 PF", "H2 ret%", "H2 PF", "ret/DD")
+		fmt.Println(strings.Repeat("-", 150))
+		if *detail == "combo" {
+			pvs = pvs2
+		}
+		all := append([]pv{{vs[0].name, func(*config.Config) {}}}, pvs...)
+		for _, v := range all {
+			c := cfg
+			v.f(&c)
+			if err := c.Validate(); err != nil {
+				fail(err)
+			}
+			f, h1, h2 := run(in, c, from, to), run(in, c, from, mid), run(in, c, mid, to)
+			fmt.Printf("%-62s | %8.1f %6.1f %5.2f %5d %6.1f %6.1f | %7.1f %5.2f | %7.1f %5.2f | %5.2f\n", v.name,
+				f.TotalReturnPct, f.MaxDrawdownPct, f.ProfitFactor, f.Trades, f.WinRatePct, f.ExposurePct, h1.TotalReturnPct, h1.ProfitFactor, h2.TotalReturnPct, h2.ProfitFactor, f.TotalReturnPct/f.MaxDrawdownPct)
+		}
+		return
 	}
 	fmt.Printf("%-62s | %8s %6s %5s %5s %6s %6s | %7s %5s | %7s %5s\n", "variant", "return%", "maxDD%", "PF", "trd", "win%", "avgW/L", "H1 ret%", "H1 PF", "H2 ret%", "H2 PF")
 	fmt.Println(strings.Repeat("-", 142))
