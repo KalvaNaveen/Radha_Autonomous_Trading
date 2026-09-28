@@ -1,9 +1,7 @@
-// Package models holds the data types shared by every component of the engine.
-// Nothing in here performs I/O; these are plain values passed over channels.
+// Package models holds the data types shared across the swing engine.
 package models
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -13,104 +11,34 @@ import (
 // Market data
 // ---------------------------------------------------------------------------
 
-// Tick is the engine's normalised view of one KiteTicker packet (full mode).
-type Tick struct {
+// Bar is one daily OHLCV candle. Date is the trading day (00:00 IST).
+type Bar struct {
+	Date   time.Time `json:"d"`
+	Open   float64   `json:"o"`
+	High   float64   `json:"h"`
+	Low    float64   `json:"l"`
+	Close  float64   `json:"c"`
+	Volume float64   `json:"v"`
+}
+
+// Quote is a live snapshot of one instrument.
+type Quote struct {
 	InstrumentToken uint32
 	LastPrice       float64
-	LastTradedQty   uint32
-	// VolumeTraded is the exchange's cumulative traded volume for the day.
-	VolumeTraded uint64
-	// AverageTradePrice is the exchange-computed volume weighted average price
-	// for the day (i.e. the exchange VWAP). Zero for indices.
-	AverageTradePrice float64
-	BestBid           float64
-	BestAsk           float64
-	DayOpen           float64
-	// ExchangeTime is the exchange timestamp of the packet. Falls back to
-	// ReceivedAt when the exchange does not send one (indices in some modes).
-	ExchangeTime time.Time
-	ReceivedAt   time.Time
-	IsIndex      bool
-}
-
-// MarketTime returns the timestamp the strategy should use for bucketing.
-func (t Tick) MarketTime() time.Time {
-	if !t.ExchangeTime.IsZero() {
-		return t.ExchangeTime
-	}
-	return t.ReceivedAt
-}
-
-// Candle is an OHLCV bar. Start is inclusive, End exclusive.
-type Candle struct {
-	InstrumentToken uint32
-	Interval        time.Duration
-	Start           time.Time
-	End             time.Time
 	Open            float64
 	High            float64
 	Low             float64
-	Close           float64
-	Volume          uint64
-	TickCount       int
-}
-
-func (c Candle) String() string {
-	return fmt.Sprintf("%s %s O=%.2f H=%.2f L=%.2f C=%.2f V=%d",
-		c.Interval, c.Start.Format("15:04"), c.Open, c.High, c.Low, c.Close, c.Volume)
+	PrevClose       float64
+	BestBid         float64
+	BestAsk         float64
+	UpperCircuit    float64
+	LowerCircuit    float64
+	Time            time.Time
 }
 
 // ---------------------------------------------------------------------------
 // Orders
 // ---------------------------------------------------------------------------
-
-// Side is the direction of a position.
-type Side int
-
-const (
-	SideNone Side = iota
-	SideLong
-	SideShort
-)
-
-func (s Side) String() string {
-	switch s {
-	case SideLong:
-		return "LONG"
-	case SideShort:
-		return "SHORT"
-	default:
-		return "NONE"
-	}
-}
-
-// Sign returns +1 for long, -1 for short, 0 otherwise.
-func (s Side) Sign() float64 {
-	switch s {
-	case SideLong:
-		return 1
-	case SideShort:
-		return -1
-	default:
-		return 0
-	}
-}
-
-// EntryTxn is the transaction that opens a position on this side.
-func (s Side) EntryTxn() TransactionType {
-	if s == SideShort {
-		return TxnSell
-	}
-	return TxnBuy
-}
-
-// ExitTxn is the transaction that closes a position on this side.
-func (s Side) ExitTxn() TransactionType {
-	if s == SideShort {
-		return TxnBuy
-	}
-	return TxnSell
-}
 
 // TransactionType mirrors Kite's BUY / SELL.
 type TransactionType string
@@ -126,8 +54,6 @@ type OrderType string
 const (
 	OrderMarket OrderType = "MARKET"
 	OrderLimit  OrderType = "LIMIT"
-	OrderSL     OrderType = "SL"
-	OrderSLM    OrderType = "SL-M"
 )
 
 // Validity mirrors Kite's validity values.
@@ -138,84 +64,43 @@ const (
 	ValidityIOC Validity = "IOC"
 )
 
-// OrderAction is the REST operation the order manager must perform.
+// ProductCNC is delivery. The swing engine trades nothing else.
+const ProductCNC = "CNC"
+
+// OrderAction is the REST operation the order manager performs.
 type OrderAction int
 
 const (
 	ActionPlace OrderAction = iota
 	ActionModify
 	ActionCancel
+	ActionGTTPlace
+	ActionGTTModify
+	ActionGTTDelete
 )
 
 func (a OrderAction) String() string {
-	switch a {
-	case ActionPlace:
-		return "PLACE"
-	case ActionModify:
-		return "MODIFY"
-	case ActionCancel:
-		return "CANCEL"
-	default:
-		return "UNKNOWN"
-	}
+	return [...]string{"PLACE", "MODIFY", "CANCEL", "GTT_PLACE", "GTT_MODIFY", "GTT_DELETE"}[a]
 }
 
 // Priority orders the outbound queue. Lower value = served first.
 type Priority int
 
 const (
-	// PriorityEmergency: kill switch, emergency flatten, naked-position exits.
-	PriorityEmergency Priority = iota
-	// PriorityStop: stop-loss placement, modification, trailing moves.
-	PriorityStop
-	// PriorityEntry: new positions. Dropped wholesale by the kill switch.
-	PriorityEntry
+	PriorityEmergency Priority = iota // gap-through-stop exits, protective sells
+	PriorityStop                      // GTT stop placement / updates, planned exits
+	PriorityEntry                     // new positions
 	numPriorities
 )
 
-// NumPriorities is the number of distinct priority lanes.
+// NumPriorities is the number of lanes.
 const NumPriorities = int(numPriorities)
 
 func (p Priority) String() string {
-	switch p {
-	case PriorityEmergency:
-		return "P1-EMERGENCY"
-	case PriorityStop:
-		return "P2-STOP"
-	case PriorityEntry:
-		return "P3-ENTRY"
-	default:
-		return "P?"
-	}
+	return [...]string{"P1-EMERGENCY", "P2-STOP", "P3-ENTRY"}[p]
 }
 
-// OrderPurpose tells the agent what a request was for when the result returns.
-type OrderPurpose int
-
-const (
-	PurposeEntry       OrderPurpose = iota // open a position (marketable limit IOC)
-	PurposeEntryCancel                     // cancel an entry that did not fill in time
-	PurposeStopPlace                       // place the protective SL-M
-	PurposeStopModify                      // move the protective SL-M (breakeven / trail)
-	PurposeStopCancel                      // cancel the SL-M (cancel-and-replace, or before a plain exit)
-	PurposeExitViaStop                     // convert the SL-M into a MARKET order (atomic exit)
-	PurposeExitPlace                       // place a fresh MARKET exit
-)
-
-func (p OrderPurpose) String() string {
-	return [...]string{"ENTRY", "ENTRY_CANCEL", "STOP_PLACE", "STOP_MODIFY", "STOP_CANCEL", "EXIT_VIA_STOP", "EXIT_PLACE"}[p]
-}
-
-// IsProtective reports whether a failure of this request can leave a position unhedged.
-func (p OrderPurpose) IsProtective() bool {
-	switch p {
-	case PurposeStopPlace, PurposeStopModify, PurposeExitViaStop, PurposeExitPlace:
-		return true
-	}
-	return false
-}
-
-// OrderRequest is the broker-level description of an order.
+// OrderRequest describes an order or a GTT.
 type OrderRequest struct {
 	InstrumentToken uint32 // not sent to Kite; used for routing and paper fills
 	Exchange        string
@@ -223,54 +108,48 @@ type OrderRequest struct {
 	TransactionType TransactionType
 	OrderType       OrderType
 	Validity        Validity
+	Product         string
 	Quantity        int
-	Price           float64 // LIMIT / SL only
-	TriggerPrice    float64 // SL / SL-M only
-	// MarketProtection is mandatory (non-zero) for MARKET and SL-M orders.
-	// -1 asks Kite to apply its automatic protection band.
+	Price           float64 // LIMIT price (for a GTT: the limit placed on trigger)
+	TriggerPrice    float64 // GTT trigger
+	LastPrice       float64 // GTT: current LTP (Kite requires it)
+	// MarketProtection is mandatory (non-zero) for MARKET orders; -1 = Kite auto.
 	MarketProtection float64
 	Tag              string
 }
 
-// OrderPayload is what a stock agent submits to the central order manager.
+// OrderPayload is submitted to the central order manager.
 type OrderPayload struct {
-	ID              uint64 // assigned by the order manager
+	ID              uint64
 	Action          OrderAction
 	Priority        Priority
-	Purpose         OrderPurpose
 	InstrumentToken uint32
-	BrokerOrderID   string // required for modify / cancel
+	BrokerOrderID   string // order ID, or GTT trigger ID for GTT actions
 	Request         OrderRequest
 	SubmittedAt     time.Time
-	// MaxAttempts overrides the priority's default retry budget (0 = default).
-	MaxAttempts int
-	// Reply receives exactly one OrderResult. Must be buffered (cap >= 1) or
-	// have a dedicated reader; the order manager never blocks on it.
-	Reply chan<- OrderResult
+	MaxAttempts     int
+	Reply           chan<- OrderResult
 }
 
-// OrderResult is the order manager's answer to an OrderPayload.
+// OrderResult is the order manager's answer.
 type OrderResult struct {
 	PayloadID     uint64
 	Action        OrderAction
-	Purpose       OrderPurpose
 	BrokerOrderID string
 	Attempts      int
 	Err           error
 	Latency       time.Duration
 }
 
-// Broker order statuses we act on (Kite strings).
+// Broker order statuses.
 const (
-	StatusOpen           = "OPEN"
-	StatusComplete       = "COMPLETE"
-	StatusCancelled      = "CANCELLED"
-	StatusRejected       = "REJECTED"
-	StatusTriggerPending = "TRIGGER PENDING"
+	StatusOpen      = "OPEN"
+	StatusComplete  = "COMPLETE"
+	StatusCancelled = "CANCELLED"
+	StatusRejected  = "REJECTED"
 )
 
-// OrderUpdate is a broker-side status snapshot for one order, either from the
-// WebSocket postback stream or from the reconciliation poller.
+// OrderUpdate is a broker-side status snapshot for one order.
 type OrderUpdate struct {
 	OrderID         string
 	InstrumentToken uint32
@@ -279,11 +158,11 @@ type OrderUpdate struct {
 	StatusMessage   string
 	TransactionType TransactionType
 	OrderType       OrderType
+	Product         string
 	Quantity        int
 	FilledQuantity  int
 	PendingQuantity int
 	AveragePrice    float64
-	TriggerPrice    float64
 	Price           float64
 	Tag             string
 	UpdatedAt       time.Time
@@ -299,19 +178,37 @@ func (u OrderUpdate) IsTerminal() bool {
 }
 
 // IsLive reports whether the order is resting at the exchange.
-func (u OrderUpdate) IsLive() bool {
-	return !u.IsTerminal() && u.Status != ""
+func (u OrderUpdate) IsLive() bool { return !u.IsTerminal() && u.Status != "" }
+
+// GTT statuses (Kite).
+const (
+	GTTActive    = "active"
+	GTTTriggered = "triggered"
+	GTTDisabled  = "disabled"
+	GTTExpired   = "expired"
+	GTTCancelled = "cancelled"
+	GTTRejected  = "rejected"
+	GTTDeleted   = "deleted"
+)
+
+// GTTInfo is a broker-side snapshot of one GTT trigger.
+type GTTInfo struct {
+	ID              string
+	InstrumentToken uint32
+	TradingSymbol   string
+	Status          string
+	TriggerPrice    float64
+	LimitPrice      float64
+	Quantity        int
+	OrderID         string // order placed when triggered, if any
 }
 
-// Tag format: "ka" + decimal instrument token. Kite tags are <= 20 chars
-// alphanumeric; this lets the router map any broker update back to the agent
-// that owns it without waiting for the place-order response.
-const tagPrefix = "ka"
+// Tag format: "ks" + instrument token. Only orders carrying this tag are ever
+// touched by the engine — your other holdings and manual orders are left alone.
+const tagPrefix = "ks"
 
 // TagForToken returns the order tag for an instrument.
-func TagForToken(token uint32) string {
-	return tagPrefix + strconv.FormatUint(uint64(token), 10)
-}
+func TagForToken(token uint32) string { return tagPrefix + strconv.FormatUint(uint64(token), 10) }
 
 // TokenFromTag parses a tag produced by TagForToken.
 func TokenFromTag(tag string) (uint32, bool) {
@@ -326,101 +223,79 @@ func TokenFromTag(tag string) (uint32, bool) {
 }
 
 // ---------------------------------------------------------------------------
-// Agent state
+// Swing positions and trades
 // ---------------------------------------------------------------------------
 
-// AgentState is the lifecycle state of one stock agent.
-type AgentState int
+// SetupKind is the entry pattern that produced a signal.
+type SetupKind string
 
 const (
-	StateFlat AgentState = iota
-	StatePendingEntry
-	StateInPosition
-	StateTrailing
-	StatePendingExit
-	StateHalted // done for the day (kill switch fired / max trades hit / fatal error)
+	SetupPullback SetupKind = "PULLBACK"
+	SetupBreakout SetupKind = "BREAKOUT"
 )
 
-func (s AgentState) String() string {
-	return [...]string{"FLAT", "PENDING_ENTRY", "IN_POSITION", "TRAILING", "PENDING_EXIT", "HALTED"}[s]
-}
-
-// LockStage tracks how far the stop has been ratcheted.
-type LockStage int
+// StopStage tracks how far the stop has been ratcheted.
+type StopStage string
 
 const (
-	LockNone      LockStage = iota // initial hard stop (20 EMA / max 0.80%)
-	LockBreakeven                  // stop at entry ± round-trip cost
-	LockProfit                     // stop locks the minimum net profit
+	StageInitial   StopStage = "INITIAL"   // entry − 2×ATR
+	StageBreakeven StopStage = "BREAKEVEN" // +1R reached: entry + costs
+	StageLocked    StopStage = "LOCKED"    // +2R reached: entry + 1R
+	StageTrailing  StopStage = "TRAILING"  // highest close − 3×ATR above the lock
 )
 
-func (l LockStage) String() string {
-	return [...]string{"NONE", "BREAKEVEN", "PROFIT_LOCK"}[l]
-}
-
-// Position is an open position owned by one agent.
+// Position is one open swing position (persisted across days).
 type Position struct {
-	InstrumentToken uint32
-	TradingSymbol   string
-	Side            Side
-	Quantity        int
-	EntryPrice      float64
-	EntryTime       time.Time
-	StopPrice       float64
-	StopOrderID     string
-	StopModCount    int
-	Lock            LockStage
+	InstrumentToken uint32    `json:"token"`
+	Symbol          string    `json:"symbol"`
+	Quantity        int       `json:"qty"`
+	EntryPrice      float64   `json:"entry_price"`
+	EntryDate       time.Time `json:"entry_date"`
+	Setup           SetupKind `json:"setup"`
+	InitialStop     float64   `json:"initial_stop"`
+	Stop            float64   `json:"stop"`
+	Stage           StopStage `json:"stage"`
+	HighestClose    float64   `json:"highest_close"`
+	BarsHeld        int       `json:"bars_held"`
+	GTTID           string    `json:"gtt_id,omitempty"`
+	GTTTrigger      float64   `json:"gtt_trigger,omitempty"`
+	PendingExit     string    `json:"pending_exit,omitempty"` // reason; executed at the next morning run
+	LastClose       float64   `json:"last_close"`
+	LastPrice       float64   `json:"last_price"`
+	EntryCosts      float64   `json:"entry_costs"`
 }
 
-// UnrealizedPnL at the given price.
-func (p Position) UnrealizedPnL(ltp float64) float64 {
-	return p.Side.Sign() * (ltp - p.EntryPrice) * float64(p.Quantity)
+// RiskPerShare is 1R.
+func (p Position) RiskPerShare() float64 { return p.EntryPrice - p.InitialStop }
+
+// Signal is an entry candidate produced by the evening scan.
+type Signal struct {
+	InstrumentToken uint32    `json:"token"`
+	Symbol          string    `json:"symbol"`
+	Date            time.Time `json:"date"` // the bar the signal formed on
+	Setup           SetupKind `json:"setup"`
+	Close           float64   `json:"close"`
+	Stop            float64   `json:"stop"`
+	ATR             float64   `json:"atr"`
+	RS              float64   `json:"rs"` // relative strength vs the index, % points
+	Score           float64   `json:"score"`
+	Reason          string    `json:"reason"`
 }
 
-// GrossReturn is the fractional move in the position's favour.
-func (p Position) GrossReturn(ltp float64) float64 {
-	if p.EntryPrice == 0 {
-		return 0
-	}
-	return p.Side.Sign() * (ltp - p.EntryPrice) / p.EntryPrice
+// Trade is one completed round trip.
+type Trade struct {
+	Symbol     string    `json:"symbol"`
+	Setup      SetupKind `json:"setup"`
+	Quantity   int       `json:"qty"`
+	EntryDate  time.Time `json:"entry_date"`
+	EntryPrice float64   `json:"entry_price"`
+	ExitDate   time.Time `json:"exit_date"`
+	ExitPrice  float64   `json:"exit_price"`
+	Gross      float64   `json:"gross"`
+	Costs      float64   `json:"costs"`
+	Net        float64   `json:"net"`
+	RMultiple  float64   `json:"r"`
+	BarsHeld   int       `json:"bars_held"`
+	Stage      StopStage `json:"stage"`
+	Reason     string    `json:"reason"`
 }
-
-// TradeRecord is one completed round trip, written to the daily journal.
-type TradeRecord struct {
-	TradingSymbol string
-	Side          Side
-	Quantity      int
-	EntryTime     time.Time
-	EntryPrice    float64
-	ExitTime      time.Time
-	ExitPrice     float64
-	GrossPnL      float64
-	EstCosts      float64
-	NetPnL        float64
-	ExitReason    string
-	MaxLock       LockStage
-}
-
-// AgentSnapshot is a read-only view of an agent for the status endpoint.
-type AgentSnapshot struct {
-	TradingSymbol string    `json:"symbol"`
-	State         string    `json:"state"`
-	LastPrice     float64   `json:"ltp"`
-	VWAP          float64   `json:"vwap"`
-	EMA10         float64   `json:"ema10"`
-	EMA20         float64   `json:"ema20"`
-	RVOL          float64   `json:"rvol"`
-	Trades        int       `json:"trades_today"`
-	RealizedPnL   float64   `json:"realized_pnl"`
-	Position      *Position `json:"position,omitempty"`
-	LastSignal    string    `json:"last_signal,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
-}
-
-// MarshalText makes enums render as names in JSON logs and the status endpoint.
-func (s Side) MarshalText() ([]byte, error)         { return []byte(s.String()), nil }
-func (s AgentState) MarshalText() ([]byte, error)   { return []byte(s.String()), nil }
-func (l LockStage) MarshalText() ([]byte, error)    { return []byte(l.String()), nil }
-func (p Priority) MarshalText() ([]byte, error)     { return []byte(p.String()), nil }
-func (p OrderPurpose) MarshalText() ([]byte, error) { return []byte(p.String()), nil }
-func (a OrderAction) MarshalText() ([]byte, error)  { return []byte(a.String()), nil }

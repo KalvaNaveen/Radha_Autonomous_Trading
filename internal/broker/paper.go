@@ -3,40 +3,32 @@ package broker
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/nkalva/kitealgo/pkg/models"
 )
 
-// Paper is a fill simulator driven by the live tick feed. It implements
-// Trader with Kite-like semantics (IOC limits, SL-M triggers, modify-to-market,
-// status transitions) so the full engine — rate limiter, reconciliation, agent
-// state machines — runs unchanged without touching real money.
+// Paper simulates a delivery account: cash, holdings, orders and GTTs, filled
+// against prices the engine feeds in (live Kite quotes in paper mode). Its
+// state is kept in memory and snapshotted by the engine's portfolio store;
+// it is recreated from the store on restart.
 //
-// Fills are deliberately pessimistic: marketable orders fill at the far side of
-// the book (ask for buys, bid for sells) plus SlippageBps.
+// Fills are pessimistic: buys at the ask, sells at the bid, plus SlippagePct.
 type Paper struct {
 	mu          sync.Mutex
 	seq         int
+	gseq        int
+	cash        float64
+	holdings    map[uint32]*Holding
 	orders      map[string]*paperOrder
-	quotes      map[uint32]models.Tick
-	netQty      map[uint32]int
-	avgPx       map[uint32]float64
-	symbols     map[uint32]string
-	SlippageBps float64
-	Margin      float64
+	gtts        map[string]*paperGTT
+	quotes      map[uint32]models.Quote
+	SlippagePct float64
 	now         func() time.Time
-
-	updates chan models.OrderUpdate
-	handler func(models.OrderUpdate)
-	hmu     sync.RWMutex
-
-	faults     map[models.OrderAction][]ErrOutcome
-	typeFaults map[models.OrderType][]ErrOutcome
-	// OnSuccessFault, when set for an action, makes the call act at the broker
-	// and still return an ambiguous error (to test PLACE de-duplication).
-	actThenFail map[models.OrderAction]int
+	faults      map[models.OrderAction][]ErrOutcome
 }
 
 type paperOrder struct {
@@ -44,65 +36,39 @@ type paperOrder struct {
 	req models.OrderRequest
 }
 
-// NewPaper creates a paper broker. margin is the simulated available margin.
-func NewPaper(margin float64, now func() time.Time) *Paper {
+type paperGTT struct {
+	info models.GTTInfo
+	req  models.OrderRequest
+}
+
+// NewPaper creates a paper account with starting cash.
+func NewPaper(cash float64, now func() time.Time) *Paper {
 	if now == nil {
 		now = time.Now
 	}
-	p := &Paper{
-		orders: map[string]*paperOrder{}, quotes: map[uint32]models.Tick{},
-		netQty: map[uint32]int{}, avgPx: map[uint32]float64{}, symbols: map[uint32]string{},
-		SlippageBps: 2, Margin: margin, now: now,
-		updates:     make(chan models.OrderUpdate, 4096),
-		faults:      map[models.OrderAction][]ErrOutcome{},
-		typeFaults:  map[models.OrderType][]ErrOutcome{},
-		actThenFail: map[models.OrderAction]int{},
-	}
-	go p.dispatch()
-	return p
+	return &Paper{cash: cash, holdings: map[uint32]*Holding{}, orders: map[string]*paperOrder{},
+		gtts: map[string]*paperGTT{}, quotes: map[uint32]models.Quote{}, SlippagePct: 0.1, now: now,
+		faults: map[models.OrderAction][]ErrOutcome{}}
 }
 
-// SetUpdateHandler registers the order-postback callback (like KiteTicker.OnOrderUpdate).
-func (p *Paper) SetUpdateHandler(h func(models.OrderUpdate)) {
-	p.hmu.Lock()
-	p.handler = h
-	p.hmu.Unlock()
+// Seed restores a holding (from the engine's persisted state).
+func (p *Paper) Seed(token uint32, sym string, qty int, avg float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.holdings[token] = &Holding{InstrumentToken: token, TradingSymbol: sym, Quantity: qty, AveragePrice: avg}
 }
 
-func (p *Paper) dispatch() {
-	for u := range p.updates {
-		p.hmu.RLock()
-		h := p.handler
-		p.hmu.RUnlock()
-		if h != nil {
-			h(u)
-		}
-	}
-}
+// SetCash overrides the simulated cash balance.
+func (p *Paper) SetCash(c float64) { p.mu.Lock(); p.cash = c; p.mu.Unlock() }
 
-// InjectFault makes the next call of the given action fail with outcome.
+// InjectFault makes the next call of an action fail.
 func (p *Paper) InjectFault(a models.OrderAction, o ErrOutcome) {
 	p.mu.Lock()
 	p.faults[a] = append(p.faults[a], o)
 	p.mu.Unlock()
 }
 
-// InjectPlaceFault makes the next PLACE of the given order type fail.
-func (p *Paper) InjectPlaceFault(t models.OrderType, o ErrOutcome) {
-	p.mu.Lock()
-	p.typeFaults[t] = append(p.typeFaults[t], o)
-	p.mu.Unlock()
-}
-
-// InjectActThenFail makes the next call of action succeed at the broker but
-// return an ambiguous error to the caller (simulates a timeout after acceptance).
-func (p *Paper) InjectActThenFail(a models.OrderAction) {
-	p.mu.Lock()
-	p.actThenFail[a]++
-	p.mu.Unlock()
-}
-
-func (p *Paper) takeFault(a models.OrderAction) error {
+func (p *Paper) fault(a models.OrderAction) error {
 	if q := p.faults[a]; len(q) > 0 {
 		p.faults[a] = q[1:]
 		return &SimError{Outcome: q[0], Msg: fmt.Sprintf("paper: injected %s on %s", q[0], a)}
@@ -110,212 +76,165 @@ func (p *Paper) takeFault(a models.OrderAction) error {
 	return nil
 }
 
-func (p *Paper) takeActThenFail(a models.OrderAction) bool {
-	if p.actThenFail[a] > 0 {
-		p.actThenFail[a]--
-		return true
-	}
-	return false
+// OnQuote feeds a price; it can fill resting orders and trigger GTTs.
+func (p *Paper) OnQuote(q models.Quote) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.quotes[q.InstrumentToken] = q
+	p.evaluateLocked(q.InstrumentToken)
 }
 
-// OnTick feeds a market-data tick; it may trigger or fill resting orders.
-func (p *Paper) OnTick(t models.Tick) {
+// ApplyDailyBar replays a completed day for GTTs that a sparse quote poll may
+// have missed (the machine was off, or the low happened between polls):
+// if the day's low reached the trigger, the stop is treated as triggered —
+// at the open if the stock gapped below it. This mirrors the backtester.
+func (p *Paper) ApplyDailyBar(token uint32, b models.Bar) {
 	p.mu.Lock()
-	p.quotes[t.InstrumentToken] = t
-	var out []models.OrderUpdate
-	for _, o := range p.orders {
-		if o.req.InstrumentToken != t.InstrumentToken || o.u.IsTerminal() {
+	defer p.mu.Unlock()
+	for _, g := range p.gtts {
+		if g.info.InstrumentToken != token || g.info.Status != models.GTTActive || b.Low > g.info.TriggerPrice {
 			continue
 		}
-		if u, ok := p.tryFill(o, t); ok {
-			out = append(out, u)
+		px := g.info.TriggerPrice
+		if b.Open < px {
+			px = b.Open
 		}
-	}
-	p.mu.Unlock()
-	for _, u := range out {
-		p.updates <- u
+		g.info.Status = models.GTTTriggered
+		id := p.newOrderLocked(g.req)
+		o := p.orders[id]
+		p.fillLocked(o, px*(1-p.SlippagePct/100))
+		g.info.OrderID = id
 	}
 }
 
-func (p *Paper) fillPrice(txn models.TransactionType, t models.Tick) float64 {
-	px := t.LastPrice
-	if txn == models.TxnBuy && t.BestAsk > 0 {
-		px = t.BestAsk
+func (p *Paper) evaluateLocked(token uint32) {
+	q, ok := p.quotes[token]
+	if !ok {
+		return
 	}
-	if txn == models.TxnSell && t.BestBid > 0 {
-		px = t.BestBid
+	for _, g := range p.gtts {
+		if g.info.InstrumentToken == token && g.info.Status == models.GTTActive && q.LastPrice <= g.info.TriggerPrice {
+			g.info.Status = models.GTTTriggered
+			id := p.newOrderLocked(g.req)
+			g.info.OrderID = id
+		}
 	}
-	slip := px * p.SlippageBps / 10000
+	for _, o := range p.orders {
+		if o.req.InstrumentToken != token || o.u.IsTerminal() {
+			continue
+		}
+		p.tryFillLocked(o, q)
+	}
+}
+
+func (p *Paper) px(txn models.TransactionType, q models.Quote) float64 {
+	px := q.LastPrice
+	if txn == models.TxnBuy && q.BestAsk > 0 {
+		px = q.BestAsk
+	}
+	if txn == models.TxnSell && q.BestBid > 0 {
+		px = q.BestBid
+	}
+	s := px * p.SlippagePct / 100
 	if txn == models.TxnBuy {
-		return px + slip
+		return px + s
 	}
-	return px - slip
+	return px - s
 }
 
-// tryFill must be called with p.mu held.
-func (p *Paper) tryFill(o *paperOrder, t models.Tick) (models.OrderUpdate, bool) {
-	r := o.req
-	ltp := t.LastPrice
-	switch r.OrderType {
+func (p *Paper) tryFillLocked(o *paperOrder, q models.Quote) {
+	px := p.px(o.req.TransactionType, q)
+	switch o.req.OrderType {
 	case models.OrderMarket:
-		return p.fill(o, p.fillPrice(r.TransactionType, t)), true
+		p.fillLocked(o, px)
 	case models.OrderLimit:
-		px := p.fillPrice(r.TransactionType, t)
-		if (r.TransactionType == models.TxnBuy && px <= r.Price) || (r.TransactionType == models.TxnSell && px >= r.Price) {
-			return p.fill(o, px), true
-		}
-	case models.OrderSLM:
-		if (r.TransactionType == models.TxnSell && ltp <= r.TriggerPrice) || (r.TransactionType == models.TxnBuy && ltp >= r.TriggerPrice) {
-			return p.fill(o, p.fillPrice(r.TransactionType, t)), true
+		if (o.req.TransactionType == models.TxnBuy && px <= o.req.Price) || (o.req.TransactionType == models.TxnSell && px >= o.req.Price) {
+			p.fillLocked(o, px)
+		} else if o.req.Validity == models.ValidityIOC {
+			o.u.Status, o.u.StatusMessage = models.StatusCancelled, "IOC not filled"
 		}
 	}
-	return models.OrderUpdate{}, false
 }
 
-// fill must be called with p.mu held.
-func (p *Paper) fill(o *paperOrder, px float64) models.OrderUpdate {
+func (p *Paper) fillLocked(o *paperOrder, px float64) {
 	q := o.req.Quantity
 	tok := o.req.InstrumentToken
-	sign := 1
-	if o.req.TransactionType == models.TxnSell {
-		sign = -1
+	h := p.holdings[tok]
+	if o.req.TransactionType == models.TxnBuy {
+		if h == nil {
+			h = &Holding{InstrumentToken: tok, TradingSymbol: o.req.TradingSymbol}
+			p.holdings[tok] = h
+		}
+		h.AveragePrice = (h.AveragePrice*float64(h.Quantity) + px*float64(q)) / float64(h.Quantity+q)
+		h.Quantity += q
+		p.cash -= px * float64(q)
+	} else {
+		if h == nil || h.Quantity < q {
+			o.u.Status, o.u.StatusMessage = models.StatusRejected, "insufficient holdings"
+			return
+		}
+		h.Quantity -= q
+		p.cash += px * float64(q)
+		if h.Quantity == 0 {
+			delete(p.holdings, tok)
+		}
 	}
-	prev := p.netQty[tok]
-	next := prev + sign*q
-	switch {
-	case next == 0:
-		p.avgPx[tok] = 0
-	case prev == 0 || (prev > 0) != (next > 0):
-		p.avgPx[tok] = px
-	case (prev > 0) == (sign > 0):
-		p.avgPx[tok] = (p.avgPx[tok]*float64(abs(prev)) + px*float64(q)) / float64(abs(next))
-	}
-	p.netQty[tok] = next
-	o.u.Status = models.StatusComplete
-	o.u.FilledQuantity = q
-	o.u.PendingQuantity = 0
-	o.u.AveragePrice = px
-	o.u.UpdatedAt = p.now()
-	return o.u
+	o.u.Status, o.u.FilledQuantity, o.u.PendingQuantity, o.u.AveragePrice, o.u.UpdatedAt = models.StatusComplete, q, 0, px, p.now()
 }
 
-func abs(v int) int {
-	if v < 0 {
-		return -v
-	}
-	return v
+func (p *Paper) newOrderLocked(req models.OrderRequest) string {
+	p.seq++
+	id := fmt.Sprintf("P%08d", p.seq)
+	p.orders[id] = &paperOrder{req: req, u: models.OrderUpdate{OrderID: id, InstrumentToken: req.InstrumentToken,
+		TradingSymbol: req.TradingSymbol, Status: models.StatusOpen, TransactionType: req.TransactionType,
+		OrderType: req.OrderType, Product: models.ProductCNC, Quantity: req.Quantity, PendingQuantity: req.Quantity,
+		Price: req.Price, Tag: req.Tag, UpdatedAt: p.now()}}
+	return id
 }
 
 // PlaceOrder implements Trader.
 func (p *Paper) PlaceOrder(_ context.Context, req models.OrderRequest) (string, error) {
 	p.mu.Lock()
-	if err := p.takeFault(models.ActionPlace); err != nil {
-		p.mu.Unlock()
+	defer p.mu.Unlock()
+	if err := p.fault(models.ActionPlace); err != nil {
 		return "", err
 	}
-	if q := p.typeFaults[req.OrderType]; len(q) > 0 {
-		p.typeFaults[req.OrderType] = q[1:]
-		p.mu.Unlock()
-		return "", &SimError{Outcome: q[0], Msg: fmt.Sprintf("paper: injected %s on PLACE %s", q[0], req.OrderType)}
+	if req.OrderType == models.OrderMarket && req.MarketProtection == 0 {
+		return "", &SimError{Outcome: OutcomeRejected, Msg: "paper: market_protection required for MARKET"}
 	}
-	if (req.OrderType == models.OrderMarket || req.OrderType == models.OrderSLM) && req.MarketProtection == 0 {
-		p.mu.Unlock()
-		return "", &SimError{Outcome: OutcomeRejected, Msg: "paper: market_protection required for MARKET/SL-M"}
-	}
-	t, ok := p.quotes[req.InstrumentToken]
+	q, ok := p.quotes[req.InstrumentToken]
 	if !ok {
-		p.mu.Unlock()
-		return "", &SimError{Outcome: OutcomeRejected, Msg: "paper: no quote for instrument"}
+		return "", &SimError{Outcome: OutcomeRejected, Msg: "paper: no quote for " + req.TradingSymbol}
 	}
-	if req.OrderType == models.OrderSLM {
-		if (req.TransactionType == models.TxnSell && req.TriggerPrice >= t.LastPrice) ||
-			(req.TransactionType == models.TxnBuy && req.TriggerPrice <= t.LastPrice) {
-			p.mu.Unlock()
-			return "", &SimError{Outcome: OutcomeRejected, Msg: "paper: trigger price on wrong side of LTP"}
+	if req.TransactionType == models.TxnBuy && p.px(models.TxnBuy, q)*float64(req.Quantity) > p.cash {
+		return "", &SimError{Outcome: OutcomeRejected, Msg: "paper: insufficient funds"}
+	}
+	if req.TransactionType == models.TxnSell {
+		if h := p.holdings[req.InstrumentToken]; h == nil || h.Quantity < req.Quantity {
+			return "", &SimError{Outcome: OutcomeRejected, Msg: "paper: insufficient holdings to sell"}
 		}
 	}
-	p.seq++
-	id := fmt.Sprintf("P%08d", p.seq)
-	p.symbols[req.InstrumentToken] = req.TradingSymbol
-	o := &paperOrder{req: req, u: models.OrderUpdate{
-		OrderID: id, InstrumentToken: req.InstrumentToken, TradingSymbol: req.TradingSymbol,
-		TransactionType: req.TransactionType, OrderType: req.OrderType, Quantity: req.Quantity,
-		PendingQuantity: req.Quantity, Price: req.Price, TriggerPrice: req.TriggerPrice, Tag: req.Tag,
-		Status: models.StatusOpen, UpdatedAt: p.now(),
-	}}
-	if req.OrderType == models.OrderSLM {
-		o.u.Status = models.StatusTriggerPending
-	}
-	p.orders[id] = o
-	var out []models.OrderUpdate
-	out = append(out, o.u)
-	if u, ok := p.tryFill(o, t); ok {
-		out = append(out, u)
-	} else if req.Validity == models.ValidityIOC {
-		o.u.Status = models.StatusCancelled
-		o.u.StatusMessage = "IOC not filled"
-		out = append(out, o.u)
-	}
-	failAfter := p.takeActThenFail(models.ActionPlace)
-	p.mu.Unlock()
-	for _, u := range out {
-		p.updates <- u
-	}
-	if failAfter {
-		return "", &SimError{Outcome: OutcomeAmbiguous, Msg: "paper: simulated timeout after acceptance"}
-	}
+	id := p.newOrderLocked(req)
+	p.tryFillLocked(p.orders[id], q)
 	return id, nil
 }
 
 // ModifyOrder implements Trader.
 func (p *Paper) ModifyOrder(_ context.Context, id string, req models.OrderRequest) error {
 	p.mu.Lock()
-	if err := p.takeFault(models.ActionModify); err != nil {
-		p.mu.Unlock()
-		return err
-	}
+	defer p.mu.Unlock()
 	o, ok := p.orders[id]
 	if !ok || o.u.IsTerminal() {
-		p.mu.Unlock()
 		return &SimError{Outcome: OutcomeRejected, Msg: "paper: order not open"}
-	}
-	if (req.OrderType == models.OrderMarket || req.OrderType == models.OrderSLM) && req.MarketProtection == 0 {
-		p.mu.Unlock()
-		return &SimError{Outcome: OutcomeRejected, Msg: "paper: market_protection required"}
-	}
-	t := p.quotes[o.req.InstrumentToken]
-	if req.OrderType == models.OrderSLM {
-		if (o.req.TransactionType == models.TxnSell && req.TriggerPrice >= t.LastPrice) ||
-			(o.req.TransactionType == models.TxnBuy && req.TriggerPrice <= t.LastPrice) {
-			p.mu.Unlock()
-			return &SimError{Outcome: OutcomeRejected, Msg: "paper: trigger price on wrong side of LTP"}
-		}
 	}
 	if req.OrderType != "" {
 		o.req.OrderType = req.OrderType
-		o.u.OrderType = req.OrderType
 	}
-	if req.Quantity > 0 {
-		o.req.Quantity = req.Quantity
-		o.u.Quantity = req.Quantity
-		o.u.PendingQuantity = req.Quantity
+	if req.Price > 0 {
+		o.req.Price = req.Price
 	}
-	o.req.Price, o.u.Price = req.Price, req.Price
-	o.req.TriggerPrice, o.u.TriggerPrice = req.TriggerPrice, req.TriggerPrice
-	o.req.MarketProtection = req.MarketProtection
-	if o.req.OrderType == models.OrderSLM {
-		o.u.Status = models.StatusTriggerPending
-	} else {
-		o.u.Status = models.StatusOpen
-	}
-	o.u.UpdatedAt = p.now()
-	out := []models.OrderUpdate{o.u}
-	if u, ok := p.tryFill(o, t); ok {
-		out = append(out, u)
-	}
-	p.mu.Unlock()
-	for _, u := range out {
-		p.updates <- u
+	if q, ok := p.quotes[o.req.InstrumentToken]; ok {
+		p.tryFillLocked(o, q)
 	}
 	return nil
 }
@@ -323,20 +242,12 @@ func (p *Paper) ModifyOrder(_ context.Context, id string, req models.OrderReques
 // CancelOrder implements Trader.
 func (p *Paper) CancelOrder(_ context.Context, id string) error {
 	p.mu.Lock()
-	if err := p.takeFault(models.ActionCancel); err != nil {
-		p.mu.Unlock()
-		return err
-	}
+	defer p.mu.Unlock()
 	o, ok := p.orders[id]
 	if !ok || o.u.IsTerminal() {
-		p.mu.Unlock()
 		return &SimError{Outcome: OutcomeRejected, Msg: "paper: order not open"}
 	}
 	o.u.Status = models.StatusCancelled
-	o.u.UpdatedAt = p.now()
-	u := o.u
-	p.mu.Unlock()
-	p.updates <- u
 	return nil
 }
 
@@ -359,27 +270,104 @@ func (p *Paper) Orders(_ context.Context) ([]models.OrderUpdate, error) {
 	for _, o := range p.orders {
 		out = append(out, o.u)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].OrderID < out[j].OrderID })
 	return out, nil
 }
 
-// Positions implements Trader.
-func (p *Paper) Positions(_ context.Context) ([]Position, error) {
+// PlaceGTT implements Trader.
+func (p *Paper) PlaceGTT(_ context.Context, req models.OrderRequest) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make([]Position, 0, len(p.netQty))
-	for tok, q := range p.netQty {
-		out = append(out, Position{InstrumentToken: tok, TradingSymbol: p.symbols[tok], Exchange: "NSE",
-			Product: "MIS", NetQuantity: q, AveragePrice: p.avgPx[tok], LastPrice: p.quotes[tok].LastPrice})
+	if err := p.fault(models.ActionGTTPlace); err != nil {
+		return "", err
 	}
+	if q, ok := p.quotes[req.InstrumentToken]; ok && req.TransactionType == models.TxnSell && req.TriggerPrice >= q.LastPrice {
+		return "", &SimError{Outcome: OutcomeRejected, Msg: "paper: sell GTT trigger must be below LTP"}
+	}
+	p.gseq++
+	id := strconv.Itoa(100000 + p.gseq)
+	req.OrderType = models.OrderLimit
+	p.gtts[id] = &paperGTT{req: req, info: models.GTTInfo{ID: id, InstrumentToken: req.InstrumentToken,
+		TradingSymbol: req.TradingSymbol, Status: models.GTTActive, TriggerPrice: req.TriggerPrice,
+		LimitPrice: req.Price, Quantity: req.Quantity}}
+	return id, nil
+}
+
+// ModifyGTT implements Trader.
+func (p *Paper) ModifyGTT(_ context.Context, id string, req models.OrderRequest) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.fault(models.ActionGTTModify); err != nil {
+		return err
+	}
+	g, ok := p.gtts[id]
+	if !ok || g.info.Status != models.GTTActive {
+		return &SimError{Outcome: OutcomeRejected, Msg: "paper: GTT not active"}
+	}
+	if q, ok := p.quotes[g.req.InstrumentToken]; ok && req.TriggerPrice >= q.LastPrice {
+		return &SimError{Outcome: OutcomeRejected, Msg: "paper: sell GTT trigger must be below LTP"}
+	}
+	g.req.TriggerPrice, g.req.Price, g.req.Quantity = req.TriggerPrice, req.Price, req.Quantity
+	g.info.TriggerPrice, g.info.LimitPrice, g.info.Quantity = req.TriggerPrice, req.Price, req.Quantity
+	return nil
+}
+
+// DeleteGTT implements Trader.
+func (p *Paper) DeleteGTT(_ context.Context, id string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	g, ok := p.gtts[id]
+	if !ok || g.info.Status != models.GTTActive {
+		return &SimError{Outcome: OutcomeRejected, Msg: "paper: GTT not active"}
+	}
+	g.info.Status = models.GTTDeleted
+	return nil
+}
+
+// GTTs implements Trader.
+func (p *Paper) GTTs(_ context.Context) ([]models.GTTInfo, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]models.GTTInfo, 0, len(p.gtts))
+	for _, g := range p.gtts {
+		out = append(out, g.info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
-// AvailableMargin implements Trader.
-func (p *Paper) AvailableMargin(_ context.Context) (float64, error) { return p.Margin, nil }
-
-// NetQuantity returns the simulated net position (for tests).
-func (p *Paper) NetQuantity(token uint32) int {
+// RestoreGTT recreates an active GTT from persisted state after a restart.
+func (p *Paper) RestoreGTT(id string, req models.OrderRequest) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.netQty[token]
+	req.OrderType = models.OrderLimit
+	p.gtts[id] = &paperGTT{req: req, info: models.GTTInfo{ID: id, InstrumentToken: req.InstrumentToken,
+		TradingSymbol: req.TradingSymbol, Status: models.GTTActive, TriggerPrice: req.TriggerPrice,
+		LimitPrice: req.Price, Quantity: req.Quantity}}
+	if n, err := strconv.Atoi(id); err == nil && n-100000 > p.gseq {
+		p.gseq = n - 100000
+	}
+}
+
+// Holdings implements Trader.
+func (p *Paper) Holdings(_ context.Context) ([]Holding, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]Holding, 0, len(p.holdings))
+	for _, h := range p.holdings {
+		c := *h
+		if q, ok := p.quotes[h.InstrumentToken]; ok {
+			c.LastPrice = q.LastPrice
+		}
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TradingSymbol < out[j].TradingSymbol })
+	return out, nil
+}
+
+// AvailableCash implements Trader.
+func (p *Paper) AvailableCash(_ context.Context) (float64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cash, nil
 }

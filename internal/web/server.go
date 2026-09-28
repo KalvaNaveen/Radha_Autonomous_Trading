@@ -1,28 +1,26 @@
-// Package web serves the engine's local control panel: setup checklist, Kite
-// login, watchlist editor, live agents, positions, trades, journal history and
-// logs. It is plain HTML/JS embedded in the binary — no build step, no CDN.
+// Package web serves the swing engine's local control panel: setup
+// checklist, Kite login, portfolio, tomorrow's candidates, backtests, trade
+// journal, universe editor and logs. Plain HTML/JS embedded in the binary.
 package web
 
 import (
 	"context"
 	"embed"
-	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/nkalva/kitealgo/internal/broker"
 	"github.com/nkalva/kitealgo/internal/clock"
+	"github.com/nkalva/kitealgo/internal/data"
 	"github.com/nkalva/kitealgo/internal/engine"
-	"github.com/nkalva/kitealgo/internal/watchlist"
+	"github.com/nkalva/kitealgo/internal/swing"
+	"github.com/nkalva/kitealgo/pkg/models"
 )
 
 //go:embed index.html
@@ -41,15 +39,13 @@ func New(eng *engine.Engine, ring *LogRing, log *slog.Logger, version string) *S
 	return &Server{eng: eng, ring: ring, log: log.With("component", "web"), version: version}
 }
 
-// Handler returns all routes (UI + API + Kite login callback).
+// Handler returns all routes.
 func (s *Server) Handler() http.Handler {
 	authH := s.eng.Auth().Handler()
 	mux := http.NewServeMux()
 	mux.Handle("/login", authH)
 	mux.Handle("/kite/callback", authH)
-	mux.Handle("/status", authH)
 	mux.Handle("/healthz", authH)
-
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := assets.ReadFile("index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -58,19 +54,22 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /api/state", s.state)
 	mux.HandleFunc("GET /api/logs", s.logs)
-	mux.HandleFunc("GET /api/watchlist", s.getWatchlist)
-	mux.HandleFunc("PUT /api/watchlist", s.guard(s.putWatchlist))
+	mux.HandleFunc("GET /api/universe", s.getUniverse)
+	mux.HandleFunc("PUT /api/universe", s.guard(s.putUniverse))
 	mux.HandleFunc("POST /api/credentials", s.guard(s.postCredentials))
 	mux.HandleFunc("POST /api/retry", s.guard(func(w http.ResponseWriter, r *http.Request) {
 		s.eng.Retry()
 		writeJSON(w, map[string]string{"ok": "retry requested"})
 	}))
+	mux.HandleFunc("POST /api/backtest", s.guard(s.postBacktest))
+	mux.HandleFunc("GET /api/backtest", s.getBacktest)
+	mux.HandleFunc("GET /backtest/report", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, s.eng.ReportPath())
+	})
 	mux.HandleFunc("GET /api/journal", s.journal)
 	return mux
 }
 
-// guard rejects cross-site writes: browsers cannot attach a custom header to
-// a cross-origin request without a CORS preflight, which we never approve.
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Kitealgo") != "1" {
@@ -112,55 +111,12 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// ---------------------------------------------------------------------------
-
-type watchlistInfo struct {
-	Date     string   `json:"date"`
-	Path     string   `json:"path"`
-	Exists   bool     `json:"exists"`
-	Count    int      `json:"count"`
-	Symbols  []string `json:"symbols"`
-	Warnings []string `json:"warnings"`
-	Error    string   `json:"error,omitempty"`
-}
-
-func (s *Server) watchlistInfo(day time.Time) watchlistInfo {
-	cfg := s.eng.Config()
-	wi := watchlistInfo{Date: day.Format("2006-01-02"), Path: watchlist.PathFor(cfg.Paths.WatchlistDir, day)}
-	entries, warns, err := watchlist.Load(cfg.Paths.WatchlistDir, day)
-	wi.Warnings = warns
-	if err != nil {
-		wi.Exists = !errors.Is(err, watchlist.ErrNoWatchlist)
-		wi.Error = err.Error()
-		return wi
-	}
-	wi.Exists = true
-	wi.Count = len(entries)
-	for _, e := range entries {
-		wi.Symbols = append(wi.Symbols, e.Symbol)
-	}
-	wi.Warnings = append(wi.Warnings, s.checkSymbols(entries)...)
-	return wi
-}
-
-// checkSymbols validates against the most recent cached instrument master.
-func (s *Server) checkSymbols(entries []watchlist.Entry) []string {
-	dir := filepath.Join(s.eng.Config().Paths.DataDir, "instruments")
-	files, _ := filepath.Glob(filepath.Join(dir, "*-NSE.json"))
-	if len(files) == 0 {
-		return nil
-	}
-	sort.Strings(files)
-	raw, err := os.ReadFile(files[len(files)-1])
-	if err != nil {
-		return nil
-	}
-	var ins []broker.Instrument
-	if json.Unmarshal(raw, &ins) != nil {
-		return nil
-	}
-	_, warns := watchlist.Resolve(entries, ins)
-	return warns
+type positionView struct {
+	models.Position
+	PnL    float64 `json:"pnl"`
+	PnLPct float64 `json:"pnl_pct"`
+	RNow   float64 `json:"r_now"`
+	Value  float64 `json:"value"`
 }
 
 func (s *Server) state(w http.ResponseWriter, r *http.Request) {
@@ -172,35 +128,52 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	if len(key) > 4 {
 		hint = key[:4] + strings.Repeat("•", 6)
 	}
-	st := s.eng.State()
-	target, _ := time.ParseInLocation("2006-01-02", st.TargetDay, clock.IST)
-	out := map[string]any{
-		"now":     time.Now().In(clock.IST),
-		"mode":    cfg.Mode,
-		"version": s.version,
-		"engine":  st,
-		"setup": map[string]any{
-			"api_key_set":   key != "",
-			"api_key_hint":  hint,
-			"secret_set":    am.HasSecret(),
-			"token_valid":   valid,
-			"user_id":       tok.UserID,
-			"token_created": tok.CreatedAt,
-			"redirect_url":  cfg.Server.PublicURL + "/kite/callback",
-			"login_url":     "/login",
-			"bind_ip":       cfg.Network.BindIP,
-			"dev_mock":      cfg.Dev.APIRoot != "",
-		},
-		"watchlist": s.watchlistInfo(target),
-		"config": map[string]any{
-			"capital": cfg.Risk.Capital, "risk_per_trade_pct": cfg.Risk.RiskPerTradePct,
-			"max_open_positions": cfg.Risk.MaxOpenPositions, "daily_loss_limit_pct": cfg.Risk.DailyLossLimitPct,
-			"prepare_at": cfg.Session.PrepareAt, "market_open": cfg.Session.MarketOpen,
-			"trading_start": cfg.Session.TradingStart, "entry_cutoff": cfg.Session.EntryCutoff,
-			"square_off": cfg.Session.SquareOff, "session_end": cfg.Session.SessionEnd,
-		},
+	st := s.eng.Store().Snapshot()
+	var pos []positionView
+	for _, p := range st.SortedPositions() {
+		px := p.LastPrice
+		if px <= 0 {
+			px = p.EntryPrice
+		}
+		v := positionView{Position: *p, Value: px * float64(p.Quantity)}
+		v.PnL = (px - p.EntryPrice) * float64(p.Quantity)
+		v.PnLPct = (px/p.EntryPrice - 1) * 100
+		if rps := p.RiskPerShare(); rps > 0 {
+			v.RNow = (px - p.EntryPrice) / rps
+		}
+		pos = append(pos, v)
 	}
-	writeJSON(w, out)
+	eq := st.Equity()
+	dd := 0.0
+	if st.PeakEquity > 0 {
+		dd = (1 - eq/st.PeakEquity) * 100
+	}
+	syms, uwarns, uerr := data.LoadUniverse(cfg.Paths.UniverseFile)
+	uinfo := map[string]any{"count": len(syms), "warnings": uwarns}
+	if uerr != nil {
+		uinfo["error"] = uerr.Error()
+	}
+	writeJSON(w, map[string]any{
+		"now": time.Now().In(clock.IST), "mode": cfg.Mode, "version": s.version,
+		"engine":   s.eng.State(),
+		"backtest": s.eng.BacktestState(),
+		"setup": map[string]any{
+			"api_key_set": key != "", "api_key_hint": hint, "secret_set": am.HasSecret(),
+			"token_valid": valid, "user_id": tok.UserID, "redirect_url": cfg.Server.PublicURL + "/kite/callback",
+			"dev_mock": cfg.Dev.APIRoot != "", "bind_ip": cfg.Network.BindIP,
+		},
+		"universe": uinfo,
+		"portfolio": map[string]any{
+			"cash": st.Cash, "equity": eq, "invested": eq - st.Cash, "realized": st.Realized, "peak": st.PeakEquity,
+			"drawdown_pct": dd, "positions": pos, "pending": st.Pending, "pending_for": st.PendingFor,
+			"scanned": st.Scanned, "regime": st.Regime, "last_evening": st.LastEvening, "last_morning": st.LastMorning,
+		},
+		"config": map[string]any{
+			"capital": cfg.Risk.Capital, "risk_per_trade_pct": cfg.Risk.RiskPerTradePct, "max_positions": cfg.Risk.MaxPositions,
+			"max_position_pct": cfg.Risk.MaxPositionPct, "max_new_per_day": cfg.Risk.MaxNewPerDay, "morning_run": cfg.Session.MorningRun, "evening_run": cfg.Session.EveningRun,
+			"backtest_years": cfg.Backtest.Years,
+		},
+	})
 }
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
@@ -208,57 +181,33 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.ring.Since(after, 400))
 }
 
-func (s *Server) dayParam(r *http.Request) (time.Time, error) {
-	q := r.URL.Query().Get("date")
-	if q == "" {
-		return s.eng.TargetDay(), nil
-	}
-	return time.ParseInLocation("2006-01-02", q, clock.IST)
+func (s *Server) getUniverse(w http.ResponseWriter, r *http.Request) {
+	raw, _ := os.ReadFile(s.eng.Config().Paths.UniverseFile)
+	writeJSON(w, map[string]any{"content": string(raw)})
 }
 
-func (s *Server) getWatchlist(w http.ResponseWriter, r *http.Request) {
-	day, err := s.dayParam(r)
-	if err != nil {
-		writeErr(w, 400, "date must be YYYY-MM-DD")
-		return
-	}
-	raw, err := os.ReadFile(watchlist.PathFor(s.eng.Config().Paths.WatchlistDir, day))
-	content := ""
-	if err == nil {
-		content = string(raw)
-	}
-	writeJSON(w, map[string]any{"date": day.Format("2006-01-02"), "content": content, "info": s.watchlistInfo(day),
-		"trading_day": s.eng.Session().IsTradingDay(day)})
-}
-
-func (s *Server) putWatchlist(w http.ResponseWriter, r *http.Request) {
-	day, err := s.dayParam(r)
-	if err != nil {
-		writeErr(w, 400, "date must be YYYY-MM-DD")
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+func (s *Server) putUniverse(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 256<<10))
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
 	text := strings.ReplaceAll(string(body), "\r\n", "\n")
-	if _, _, err := watchlist.Parse(strings.NewReader(text)); err != nil {
+	syms, warns, err := data.ParseUniverse(strings.NewReader(text))
+	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	path := watchlist.PathFor(s.eng.Config().Paths.WatchlistDir, day)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if ins := s.eng.Data().LatestInstruments(); len(ins) > 0 {
+		_, rw := data.Resolve(syms, ins)
+		warns = append(warns, rw...)
+	}
+	if err := os.WriteFile(s.eng.Config().Paths.UniverseFile, []byte(text), 0o644); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	s.log.Info("watchlist saved from UI", "date", day.Format("2006-01-02"))
-	s.eng.WatchlistChanged()
-	writeJSON(w, map[string]any{"ok": true, "info": s.watchlistInfo(day)})
+	s.log.Info("universe saved from UI", "symbols", len(syms))
+	writeJSON(w, map[string]any{"ok": true, "count": len(syms), "warnings": warns})
 }
 
 func (s *Server) postCredentials(w http.ResponseWriter, r *http.Request) {
@@ -283,85 +232,70 @@ func (s *Server) postCredentials(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// ---------------------------------------------------------------------------
-// Journal
-// ---------------------------------------------------------------------------
-
-type tradeRow struct {
-	Symbol     string  `json:"symbol"`
-	Side       string  `json:"side"`
-	Qty        int     `json:"qty"`
-	EntryTime  string  `json:"entry_time"`
-	EntryPrice float64 `json:"entry_price"`
-	ExitTime   string  `json:"exit_time"`
-	ExitPrice  float64 `json:"exit_price"`
-	Gross      float64 `json:"gross"`
-	Costs      float64 `json:"costs"`
-	Net        float64 `json:"net"`
-	Reason     string  `json:"reason"`
-	MaxLock    string  `json:"max_lock"`
+func (s *Server) postBacktest(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Years int `json:"years"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in)
+	if in.Years == 0 {
+		in.Years = s.eng.Config().Backtest.Years
+	}
+	if err := s.eng.StartBacktest(in.Years); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
-type daySummary struct {
-	Date   string  `json:"date"`
+func (s *Server) getBacktest(w http.ResponseWriter, r *http.Request) {
+	raw, err := s.eng.LatestBacktest()
+	if err != nil {
+		writeJSON(w, map[string]any{"status": s.eng.BacktestState()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	st, _ := json.Marshal(s.eng.BacktestState())
+	_, _ = w.Write([]byte(`{"status":` + string(st) + `,"result":`))
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte("}"))
+}
+
+type monthRow struct {
+	Month  string  `json:"month"`
 	Trades int     `json:"trades"`
 	Wins   int     `json:"wins"`
 	Net    float64 `json:"net"`
 }
 
-func readJournal(path string) ([]tradeRow, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	recs, err := csv.NewReader(f).ReadAll()
-	if err != nil {
-		return nil, err
-	}
-	var out []tradeRow
-	num := func(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
-	for i, r := range recs {
-		if i == 0 || len(r) < 12 {
-			continue
+func (s *Server) journal(w http.ResponseWriter, r *http.Request) {
+	trades, _ := s.eng.Journal().ReadAll()
+	byMonth := map[string]*monthRow{}
+	var order []string
+	for _, t := range trades {
+		k := t.ExitDate.Format("2006-01")
+		m := byMonth[k]
+		if m == nil {
+			m = &monthRow{Month: k}
+			byMonth[k] = m
+			order = append(order, k)
 		}
-		q, _ := strconv.Atoi(r[2])
-		out = append(out, tradeRow{Symbol: r[0], Side: r[1], Qty: q, EntryTime: r[3], EntryPrice: num(r[4]),
-			ExitTime: r[5], ExitPrice: num(r[6]), Gross: num(r[7]), Costs: num(r[8]), Net: num(r[9]),
-			Reason: r[10], MaxLock: r[11]})
+		m.Trades++
+		m.Net += t.Net
+		if t.Net > 0 {
+			m.Wins++
+		}
 	}
-	return out, nil
+	months := make([]monthRow, 0, len(order))
+	for _, k := range order {
+		months = append(months, *byMonth[k])
+	}
+	// newest trades first for the table
+	rev := make([]models.Trade, len(trades))
+	for i, t := range trades {
+		rev[len(trades)-1-i] = t
+	}
+	writeJSON(w, map[string]any{"trades": rev, "months": months})
 }
 
-func (s *Server) journal(w http.ResponseWriter, r *http.Request) {
-	dir := s.eng.Config().Paths.JournalDir
-	files, _ := filepath.Glob(filepath.Join(dir, "*.csv"))
-	sort.Strings(files)
-	var days []daySummary
-	for _, f := range files {
-		rows, err := readJournal(f)
-		if err != nil {
-			continue
-		}
-		d := daySummary{Date: strings.TrimSuffix(filepath.Base(f), ".csv")}
-		for _, t := range rows {
-			d.Trades++
-			d.Net += t.Net
-			if t.Net > 0 {
-				d.Wins++
-			}
-		}
-		days = append(days, d)
-	}
-	date := r.URL.Query().Get("date")
-	if date == "" && len(days) > 0 {
-		date = days[len(days)-1].Date
-	}
-	var rows []tradeRow
-	if date != "" {
-		if _, err := time.Parse("2006-01-02", date); err == nil {
-			rows, _ = readJournal(filepath.Join(dir, date+".csv"))
-		}
-	}
-	writeJSON(w, map[string]any{"days": days, "date": date, "rows": rows})
-}
+var _ = swing.DateKey

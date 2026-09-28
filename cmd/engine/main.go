@@ -1,15 +1,14 @@
-// Command engine runs the intraday trading daemon and its local control panel.
+// Command engine runs the swing trading daemon and its local control panel.
 //
 //	engine                                 run with ./config.yaml (created on first run)
 //	engine -config path/to/config.yaml     run with a specific config
-//	engine -check                          validate config + next watchlist, then exit
+//	engine -check                          validate config + universe, then exit
 //
 // Open http://127.0.0.1:8080 for the control panel (it opens automatically).
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,8 +24,8 @@ import (
 
 	"github.com/nkalva/kitealgo/internal/clock"
 	"github.com/nkalva/kitealgo/internal/config"
+	"github.com/nkalva/kitealgo/internal/data"
 	"github.com/nkalva/kitealgo/internal/engine"
-	"github.com/nkalva/kitealgo/internal/watchlist"
 	"github.com/nkalva/kitealgo/internal/web"
 )
 
@@ -34,7 +33,7 @@ var version = "dev"
 
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "path to config file (created with paper-mode defaults if missing)")
-	check := flag.Bool("check", false, "validate config and the next watchlist, then exit")
+	check := flag.Bool("check", false, "validate config and the universe, then exit")
 	debug := flag.Bool("debug", false, "debug logging")
 	noBrowser := flag.Bool("no-browser", false, "do not open the control panel in a browser")
 	showVersion := flag.Bool("version", false, "print version")
@@ -68,7 +67,7 @@ func main() {
 		os.Exit(runCheck(cfg))
 	}
 
-	for _, dir := range []string{cfg.Paths.DataDir, cfg.Paths.JournalDir, cfg.Paths.WatchlistDir} {
+	for _, dir := range []string{cfg.Paths.DataDir, cfg.Paths.JournalDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fatal("cannot create directory %s: %v", dir, err)
 		}
@@ -179,37 +178,19 @@ func newLogger(file string, debug bool, ring *web.LogRing) (*slog.Logger, func()
 }
 
 func runCheck(cfg config.Config) int {
-	sess, err := clock.NewSession(cfg.Session, cfg.Holidays)
-	if err != nil {
+	if _, err := clock.NewSession(cfg.Session, cfg.Holidays); err != nil {
 		fmt.Println("session:", err)
 		return 1
 	}
-	now := clock.System{}.Now()
-	day := clock.Midnight(now)
-	if !sess.IsTradingDay(now) || !now.Before(sess.At(now, sess.SquareOff)) {
-		day = sess.NextTradingDay(now)
-	}
 	fmt.Printf("config OK (mode=%s, bind_ip=%q)\n", cfg.Mode, cfg.Network.BindIP)
-	fmt.Printf("next trading day: %s — expecting %s\n", day.Format("Mon 2006-01-02"), watchlist.PathFor(cfg.Paths.WatchlistDir, day))
-	entries, warns, err := watchlist.Load(cfg.Paths.WatchlistDir, day)
+	syms, warns, err := data.LoadUniverse(cfg.Paths.UniverseFile)
 	for _, w := range warns {
 		fmt.Println("  warning:", w)
 	}
 	if err != nil {
-		if errors.Is(err, watchlist.ErrNoWatchlist) {
-			fmt.Println("watchlist: none yet — add it in the control panel")
-		} else {
-			fmt.Println("watchlist:", err)
-		}
+		fmt.Println("universe:", err)
 		return 1
 	}
-	fmt.Printf("watchlist OK: %d symbols\n", len(entries))
-	for _, e := range entries {
-		if e.Benchmark != "" {
-			fmt.Printf("  %-14s benchmark=%s\n", e.Symbol, e.Benchmark)
-		} else {
-			fmt.Printf("  %s\n", e.Symbol)
-		}
-	}
+	fmt.Printf("universe OK: %d symbols\n", len(syms))
 	return 0
 }

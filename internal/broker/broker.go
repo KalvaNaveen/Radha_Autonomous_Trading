@@ -16,33 +16,36 @@ import (
 )
 
 // Trader is the order-side API. Every call that creates or changes an order
-// (Place/Modify/Cancel) must go through the order manager's rate limiter.
-// The read calls are on Kite's separate "other endpoints" budget.
+// or a GTT goes through the order manager's rate limiter; reads do not.
 type Trader interface {
 	PlaceOrder(ctx context.Context, req models.OrderRequest) (orderID string, err error)
 	ModifyOrder(ctx context.Context, orderID string, req models.OrderRequest) error
 	CancelOrder(ctx context.Context, orderID string) error
-
 	OrderStatus(ctx context.Context, orderID string) (models.OrderUpdate, error)
 	Orders(ctx context.Context) ([]models.OrderUpdate, error)
-	Positions(ctx context.Context) ([]Position, error)
-	AvailableMargin(ctx context.Context) (float64, error)
+
+	PlaceGTT(ctx context.Context, req models.OrderRequest) (gttID string, err error)
+	ModifyGTT(ctx context.Context, gttID string, req models.OrderRequest) error
+	DeleteGTT(ctx context.Context, gttID string) error
+	GTTs(ctx context.Context) ([]models.GTTInfo, error)
+
+	Holdings(ctx context.Context) ([]Holding, error)
+	AvailableCash(ctx context.Context) (float64, error)
 }
 
-// MarketData is the reference/history side of the API.
+// MarketData is the reference / history / quote side of the API.
 type MarketData interface {
 	Instruments(ctx context.Context, exchange string) ([]Instrument, error)
-	MinuteCandles(ctx context.Context, token uint32, from, to time.Time) ([]HistCandle, error)
-	FiveMinuteCandles(ctx context.Context, token uint32, from, to time.Time) ([]HistCandle, error)
+	DailyCandles(ctx context.Context, token uint32, from, to time.Time) ([]models.Bar, error)
+	// Quotes takes "EXCHANGE:SYMBOL" keys (e.g. "NSE:INFY", "NSE:NIFTY 50").
+	Quotes(ctx context.Context, keys []string) (map[string]models.Quote, error)
 }
 
-// Position is a broker net position (day positions only matter for MIS).
-type Position struct {
+// Holding is a delivery position at the broker: settled + T1 + today's CNC buys.
+type Holding struct {
 	InstrumentToken uint32
 	TradingSymbol   string
-	Exchange        string
-	Product         string
-	NetQuantity     int
+	Quantity        int
 	AveragePrice    float64
 	LastPrice       float64
 }
@@ -57,13 +60,6 @@ type Instrument struct {
 	InstrumentType  string
 	TickSize        float64
 	LotSize         int
-}
-
-// HistCandle is a historical OHLCV bar.
-type HistCandle struct {
-	Time                   time.Time
-	Open, High, Low, Close float64
-	Volume                 uint64
 }
 
 // ---------------------------------------------------------------------------

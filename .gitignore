@@ -1,8 +1,13 @@
 bin/
+dist/
 data/
 journal/
 logs/
 config.yaml
-*.env
+universe.csv
+backtest-report/
 rehearsal/
-dist/
+reh/
+*.env
+/engine
+/backtest

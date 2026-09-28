@@ -104,12 +104,12 @@ func TestPriorityQueueOrdering(t *testing.T) {
 
 func testCfg() config.OrdersConfig {
 	c := config.Defaults().Orders
-	c.StopRetryBackoff = 5 * time.Millisecond
+	c.RetryBackoff = 5 * time.Millisecond
 	return c
 }
 
 func seedQuote(p *broker.Paper, tok uint32, px float64) {
-	p.OnTick(models.Tick{InstrumentToken: tok, LastPrice: px, BestBid: px - 0.05, BestAsk: px + 0.05})
+	p.OnQuote(models.Quote{InstrumentToken: tok, LastPrice: px, BestBid: px - 0.05, BestAsk: px + 0.05})
 }
 
 func TestOMThroughputRespectsOPS(t *testing.T) {
@@ -125,9 +125,9 @@ func TestOMThroughputRespectsOPS(t *testing.T) {
 	var mu sync.Mutex
 	var times []time.Time
 	for i := 0; i < n; i++ {
-		_ = om.Submit(&models.OrderPayload{Action: models.ActionPlace, Priority: models.PriorityStop, InstrumentToken: 1,
+		_ = om.Submit(&models.OrderPayload{Action: models.ActionGTTPlace, Priority: models.PriorityStop, InstrumentToken: 1,
 			Request: models.OrderRequest{InstrumentToken: 1, TradingSymbol: "X", TransactionType: models.TxnSell,
-				OrderType: models.OrderSLM, TriggerPrice: 90, Quantity: 1, MarketProtection: -1}, Reply: reply})
+				TriggerPrice: 90, Price: 89, Quantity: 1}, Reply: reply})
 	}
 	for i := 0; i < n; i++ {
 		r := <-reply
@@ -147,40 +147,44 @@ func TestOMThroughputRespectsOPS(t *testing.T) {
 func TestStopRetryThenFail(t *testing.T) {
 	paper := broker.NewPaper(1e7, nil)
 	seedQuote(paper, 1, 100)
-	paper.InjectFault(models.ActionPlace, broker.OutcomeThrottled)
-	paper.InjectFault(models.ActionPlace, broker.OutcomeThrottled)
+	paper.InjectFault(models.ActionGTTPlace, broker.OutcomeThrottled)
+	paper.InjectFault(models.ActionGTTPlace, broker.OutcomeThrottled)
 	om := New(paper, testCfg(), quiet, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go om.Run(ctx)
 	reply := make(chan models.OrderResult, 1)
-	_ = om.Submit(&models.OrderPayload{Action: models.ActionPlace, Priority: models.PriorityStop, Purpose: models.PurposeStopPlace,
-		InstrumentToken: 1, Request: models.OrderRequest{InstrumentToken: 1, TransactionType: models.TxnSell,
-			OrderType: models.OrderSLM, TriggerPrice: 90, Quantity: 1, MarketProtection: -1}, Reply: reply})
+	_ = om.Submit(&models.OrderPayload{Action: models.ActionGTTPlace, Priority: models.PriorityStop,
+		InstrumentToken: 1, Request: models.OrderRequest{InstrumentToken: 1, TradingSymbol: "X", TransactionType: models.TxnSell,
+			TriggerPrice: 90, Price: 89, Quantity: 1}, Reply: reply})
 	r := <-reply
 	if r.Err == nil || r.Attempts != 2 {
 		t.Fatalf("stop placement must retry exactly once then fail: %+v", r)
 	}
 }
 
-func TestAmbiguousPlaceIsDeduplicated(t *testing.T) {
-	paper := broker.NewPaper(1e7, nil)
+func TestDoBuysAndSells(t *testing.T) {
+	paper := broker.NewPaper(1e6, nil)
 	seedQuote(paper, 7, 100)
-	paper.InjectActThenFail(models.ActionPlace)
 	om := New(paper, testCfg(), quiet, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go om.Run(ctx)
-	reply := make(chan models.OrderResult, 1)
-	_ = om.Submit(&models.OrderPayload{Action: models.ActionPlace, Priority: models.PriorityEmergency, Purpose: models.PurposeExitPlace,
-		InstrumentToken: 7, Request: models.OrderRequest{InstrumentToken: 7, TransactionType: models.TxnSell,
-			OrderType: models.OrderMarket, Quantity: 10, MarketProtection: -1}, Reply: reply})
-	r := <-reply
-	if r.Err != nil || r.BrokerOrderID == "" {
-		t.Fatalf("ambiguous place should resolve to the existing order: %+v", r)
+	r := om.Do(ctx, &models.OrderPayload{Action: models.ActionPlace, Priority: models.PriorityEntry, InstrumentToken: 7,
+		Request: models.OrderRequest{InstrumentToken: 7, TradingSymbol: "S", TransactionType: models.TxnBuy,
+			OrderType: models.OrderLimit, Price: 101, Quantity: 10}})
+	if r.Err != nil {
+		t.Fatal(r.Err)
 	}
-	if q := paper.NetQuantity(7); q != -10 {
-		t.Fatalf("exit must execute exactly once, net qty %d", q)
+	st, _ := paper.OrderStatus(ctx, r.BrokerOrderID)
+	if st.Status != models.StatusComplete {
+		t.Fatalf("buy not filled: %+v", st)
+	}
+	r = om.Do(ctx, &models.OrderPayload{Action: models.ActionPlace, Priority: models.PriorityEmergency, InstrumentToken: 7,
+		Request: models.OrderRequest{InstrumentToken: 7, TradingSymbol: "S", TransactionType: models.TxnSell,
+			OrderType: models.OrderMarket, Quantity: 11, MarketProtection: -1}})
+	if r.Err == nil {
+		t.Fatal("selling more than held must be rejected")
 	}
 }
 
@@ -195,20 +199,5 @@ func TestKillSwitchDropsEntries(t *testing.T) {
 		if r := <-reply; r.Err != ErrEntriesBlocked {
 			t.Fatalf("want ErrEntriesBlocked, got %v", r.Err)
 		}
-	}
-}
-
-func TestRouterDedupAndTerminalGuard(t *testing.T) {
-	r := NewUpdateRouter(quiet, nil)
-	ch := make(chan models.OrderUpdate, 10)
-	r.Register(5, ch)
-	tag := models.TagForToken(5)
-	r.Dispatch(models.OrderUpdate{OrderID: "a", Tag: tag, Status: models.StatusOpen})
-	r.Dispatch(models.OrderUpdate{OrderID: "a", Tag: tag, Status: models.StatusOpen})
-	r.Dispatch(models.OrderUpdate{OrderID: "a", Tag: tag, Status: models.StatusComplete, FilledQuantity: 1})
-	r.Dispatch(models.OrderUpdate{OrderID: "a", Tag: tag, Status: models.StatusOpen}) // stale poll
-	r.Dispatch(models.OrderUpdate{OrderID: "b", Tag: "manual", Status: models.StatusOpen})
-	if len(ch) != 2 {
-		t.Fatalf("want 2 deliveries, got %d", len(ch))
 	}
 }

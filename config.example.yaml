@@ -1,100 +1,101 @@
-# kitealgo — engine configuration. Copy to config.yaml and edit.
-# Every value below is the built-in default unless marked REQUIRED.
+# Radha swing engine — configuration. Every value shown is the built-in default.
+# Long-only equity-delivery (CNC) swing trading on NSE via Zerodha Kite Connect.
 
-# "paper" simulates fills against the LIVE Kite feed (needs a daily login too).
-# Switch to "live" only after at least a few weeks of paper sessions.
+# "paper" simulates orders against live Kite prices. Use "live" only after the
+# backtest and several weeks of paper trading look right to you.
 mode: paper
 
 kite:
-  api_key: ""                      # or enter it in the control panel (or env KITE_API_KEY)
-  api_secret: ""                   # or enter it in the control panel (or env KITE_API_SECRET)
-  access_token: ""                 # leave empty; the daily /login flow fills it
+  api_key: ""        # or enter it in the control panel (or env KITE_API_KEY)
+  api_secret: ""     # or enter it in the control panel (or env KITE_API_SECRET)
 
 network:
-  # REQUIRED in live mode: the static IPv4 registered under "IP Whitelist" in
-  # developers.kite.trade. All order REST calls dial out from this address.
+  # REQUIRED in live mode: the static IPv4 registered under "IP Whitelist" on
+  # developers.kite.trade. Order calls dial out from this address.
   bind_ip: ""
-  request_timeout: 5s
+  request_timeout: 10s
 
 paths:
-  watchlist_dir: watchlists        # drop <YYYY-MM-DD>.csv here each evening
-  data_dir: data                   # token, instrument + history caches
-  journal_dir: journal             # one trades CSV per day
+  universe_file: universe.csv   # the stocks the scanner may trade (edit in the control panel)
+  data_dir: data                # login token, candle cache, portfolio state
+  journal_dir: journal          # closed trades
   log_file: logs/engine.log
 
-session:                           # IST, HH:MM:SS
-  prepare_at: "08:30:00"           # load watchlist + history, wait for login
+session:              # IST
+  prepare_at:  "08:45:00"   # login check, reconcile with Kite holdings
   market_open: "09:15:00"
-  trading_start: "09:45:00"        # 09:15–09:45 warmup: ingest only
-  entry_cutoff: "14:45:00"         # exit-only after this
-  square_off: "15:08:00"           # kill switch (Zerodha auto-squares CAS stocks at 15:12)
-  safety_sweep: "15:09:30"         # verify flat AT THE BROKER, fix anything left
-  session_end: "15:35:00"
+  morning_run: "09:20:00"   # gap-through-stop checks, planned exits, new entries
+  market_close: "15:30:00"
+  evening_run: "15:50:00"   # today's daily candle is final: move stops, scan for tomorrow
 
-strategy:
-  candle_interval: 5m
-  candle_grace: 2s                 # wait for late ticks before closing a bar
-  fast_ema: 10
-  slow_ema: 20
-  vwap_buffer_pct: 0.20            # long only above VWAP+0.2%, short below VWAP-0.2%
-  vwap_source: exchange            # exchange ATP (exact) | computed (from tick snapshots)
-  min_rvol: 1.5
-  rvol_lookback_days: 10
-  band_tolerance_pct: 0.15         # "near the EMA band"
-  pullback_candles: 2              # crossover bar + 1 more bar for the pullback
-  max_stop_pct: 0.80
-  min_stop_pct: 0.25
-  round_trip_cost_pct: 0.15
-  breakeven_trigger_pct: 0.40      # +0.40% gross → stop to entry ± 0.15% (costs covered)
-  profit_lock_trigger_pct: 0.65    # +0.65% gross → stop to entry ± 0.40% (+0.25% net locked)
-  min_net_profit_pct: 0.25
-  trail_buffer_pct: 0.25           # resting stop = 10 EMA ∓ 0.25%
-  min_stop_step_pct: 0.05          # skip trail moves smaller than this (Kite: 25 mods/order)
-  max_trades_per_symbol: 3
-  cooldown_candles: 1
-  entry_timeout: 15s
+strategy:             # daily candles
+  ema_fast: 20
+  ema_slow: 50
+  atr_period: 14
+  volume_avg_period: 20
+  breakout_lookback: 20          # close above the prior 20-day high…
+  breakout_volume_ratio: 1.5     # …on 1.5× average volume
+  pullback_lookback: 3           # low touched the 20 EMA within the last 3 days…
+  pullback_tolerance_pct: 1.0
+  pullback_volume_ratio: 1.0     # …then closed above yesterday's high on ≥ average volume
+  slope_lookback: 5              # the 50 EMA must be rising
+  stop_atr_mult: 2.0             # initial stop = entry − 2 × ATR…
+  min_stop_pct: 3                # …clamped to 3%–8% below entry
+  max_stop_pct: 8
+  breakeven_r: 1.0               # at +1R: stop → entry + costs
+  lock_r: 2.0                    # at +2R: stop → entry + 1R
+  trail_atr_mult: 3.0            # after breakeven: stop ≥ highest close − 3 × ATR
+  exit_below_ema_fast: true      # after breakeven, a close below the 20 EMA exits next morning
+  max_hold_bars: 40              # time stop: exit after 40 days…
+  time_stop_min_r: 1.0           # …if the trade never reached +1R
+  min_price: 50
+  min_turnover_cr: 10            # average daily turnover ≥ ₹10 crore (liquidity)
+  max_gap_up_pct: 2.0            # skip an entry that opens > 2% above the signal close
+  rs_lookback: 60                # rank candidates by 60-day return vs the index
+  cooldown_bars: 5               # days to wait before re-entering a stock after an exit
 
 risk:
-  capital: 100000                  # ₹ the engine may deploy
-  risk_per_trade_pct: 0.5          # ₹ lost if the initial stop is hit = 0.5% of capital
-  max_open_positions: 10
-  mis_leverage: 5                  # planning figure for notional caps / margin checks
-  daily_loss_limit_pct: 2.0        # realized+unrealized ≤ -2% → flatten all, halt the day
-  margin_buffer_pct: 10
-  margin_refresh: 30s
+  capital: 100000                # ₹ the engine may deploy (paper: starting cash)
+  risk_per_trade_pct: 1.0        # ₹ lost if the initial stop is hit = 1% of equity
+  max_position_pct: 20           # at most 20% of equity in one stock
+  max_positions: 5
+  max_new_per_day: 2
+  drawdown_pause_pct: 15         # no new entries while equity is 15% below its peak
+
+costs:                           # Zerodha equity delivery (zerodha.com/charges)
+  brokerage_pct: 0
+  stt_pct: 0.1                   # on buy and sell
+  stamp_buy_pct: 0.015
+  exchange_pct: 0.00307          # NSE
+  sebi_per_crore: 10
+  gst_pct: 18                    # on brokerage + exchange + SEBI charges
+  dp_per_sell: 15.34             # per stock, on each day you sell
+  slippage_pct: 0.10             # assumed per side (backtest and paper fills)
 
 orders:
-  max_ops: 8                       # SEBI registration threshold is 10 OPS
-  max_per_minute: 350              # Kite: 400
-  max_per_day: 4500                # Kite: 5000
-  emergency_reserve: 300           # daily budget entries may not consume
-  workers: 8
-  stop_retry_backoff: 100ms
+  max_ops: 8                     # SEBI registration threshold is 10 orders/second
+  max_per_minute: 200
+  max_per_day: 2000
+  emergency_reserve: 100
+  workers: 4
+  retry_backoff: 200ms
   emergency_retries: 3
-  market_protection: -1            # -1 = Kite automatic protection; else a percentage
-  entry_limit_buffer_pct: 0.5      # entry = IOC limit 0.5% beyond best ask/bid
-  max_mods_per_order: 24           # then cancel-and-replace the stop
-  reconcile_interval: 3s
-  entry_max_age: 10s               # drop entries that queued longer than this
+  market_protection: -1          # MARKET orders must carry protection; -1 = Kite auto
+  entry_limit_buffer_pct: 0.5    # entry = LIMIT 0.5% above the ask (never chases further)
+  gtt_limit_buffer_pct: 1.0      # stop GTT sells with a LIMIT 1% below the trigger
+  fill_timeout: 20s
+  entry_max_age: 2m
 
-radar:
-  market_index: "NIFTY 50"
-  mode: permissive                 # strict | permissive | off
-  neutral_pct: 0.10
+market:
+  index: "NIFTY 50"
+  regime_filter: true            # new entries only while NIFTY 50 closes above its 50 EMA
 
-ticker:
-  agent_buffer: 512
-  reconnect_max_delay: 10s
-  stale_after: 30s
+backtest:
+  years: 5
 
 server:
-  # Local HTTP server: /login (daily), /kite/callback, /status, /healthz.
-  # Set your Kite app's Redirect URL to  <public_url>/kite/callback
-  # Keep it on localhost and reach it over an SSH tunnel:
-  #   ssh -L 8080:127.0.0.1:8080 you@your-vps   then open http://127.0.0.1:8080/login
   listen: "127.0.0.1:8080"
   public_url: "http://127.0.0.1:8080"
 
 # NSE trading holidays (YYYY-MM-DD). Weekends are skipped automatically.
-# Copy the dates from NSE's official holiday circular for the year.
 holidays: []

@@ -1,261 +1,191 @@
-# kitealgo — intraday MIS momentum engine for NSE (Zerodha Kite Connect)
+# Radha — automated swing trading engine for NSE (Zerodha Kite Connect)
 
-A Go daemon that trades up to 50 NSE stocks per day using a VWAP + RVOL + 10/20 EMA
-pullback strategy. It has a stepped profit lock, 10-EMA trailing stops and a hard
-square-off. Every order-changing call goes through one rate-limited, prioritised
-order manager.
+Radha trades **long-only equity delivery (CNC)**, holding positions for days to
+weeks. Each evening it scans a universe of stocks on daily candles and queues
+entry candidates. It buys them the next morning. Every position is protected at
+the broker by a **GTT stop**, which the engine ratchets upward as the trade
+works. A built-in **backtester** runs the exact same rules on years of
+history, so you can see how the strategy would have performed before you risk
+money.
 
-> **Risk notice.** This is software, not financial advice. Run it in `paper` mode
-> for several weeks before going live. Check every journal against your Kite
-> contract notes. You are responsible for your broker account and for complying
-> with SEBI's rules.
-
----
-
-## Quick start: no Go install needed
-
-Ready-made binaries are in `dist/`:
-
-| OS | File |
-|---|---|
-| Windows | `radha-engine-windows-amd64.exe` |
-| Mac (Apple Silicon) | `radha-engine-darwin-arm64` |
-| Mac (Intel) | `radha-engine-darwin-amd64` |
-| Linux | `radha-engine-linux-amd64` |
-
-1. Copy the file for your OS into an empty folder, e.g. `C:\Radha`.
-2. Run it. Double-click on Windows; the first time, SmartScreen may warn — click **More info → Run anyway**. On Mac, run `chmod +x` on the file first.
-3. On the first run it creates `config.yaml` (paper mode) and opens the **control panel** at `http://127.0.0.1:8080`.
-4. Follow the checklist in the panel:
-   1. Paste your Kite **API key and secret**. They're saved on this computer only, in `data/kite_credentials.json`.
-   2. In developers.kite.trade, set your app's **Redirect URL** to `http://127.0.0.1:8080/kite/callback`. The panel has a Copy button for it.
-   3. Click **Log in with Zerodha**. You need to do this every morning, because tokens expire at 06:00.
-   4. Add the **watchlist**: one NSE symbol per line.
-5. Leave the window open. The engine prepares at 08:30, warms up from 09:15, trades 09:45–14:45, squares off at 15:08, and journals the day.
-
-### Control panel
-
-| Area | What it shows / does |
-|---|---|
-| Checklist | Credentials, today's Kite login, the watchlist for the next trading day, the engine stage, the live feed. Each item turns ✓ when done, and anything that stopped the engine is shown with a **Retry today** button |
-| KPIs | Day P&L (net), realized, unrealized, trades, open positions, order budget left, halt reason |
-| Agents | One row per stock: state, LTP, VWAP, EMA10/20, RVOL, position, stop, lock stage, trades, net, and why the last signal fired or was skipped |
-| Watchlist | Edit and save any date's list; the list is checked as you save, and saving wakes a session that's waiting for it |
-| Trades today | The journal: entry/exit, gross, costs, net, lock stage reached, exit reason |
-| History | Per-day P&L bars, win rate and cumulative net: the 15-day paper review in one place |
-| Logs | Live log stream, optionally filtered to warnings and errors |
+> **Risk notice.** This is software, not financial advice. Backtest first, then
+> paper-trade for several weeks. Past results — real or simulated — don't
+> guarantee future ones. You are responsible for your account and for SEBI
+> compliance.
 
 ---
 
-## Your daily routine
+## Quick start
 
-| When | You | Engine |
+1. Run the binary for your OS from `dist/`:
+   - Windows: `radha-engine-windows-amd64.exe`
+   - Mac: `radha-engine-darwin-arm64` (Apple Silicon) or `radha-engine-darwin-amd64` (Intel)
+   - Linux: `radha-engine-linux-amd64`
+
+   Put it in an empty folder and run it. On the first run it creates `config.yaml` (paper mode) and `universe.csv`, and opens the control panel at `http://127.0.0.1:8080`.
+2. In the panel, paste your Kite **API key and secret**.
+3. On developers.kite.trade, set your app's **Redirect URL** to `http://127.0.0.1:8080/kite/callback`.
+4. Click **Log in with Zerodha**. Do this once per trading morning.
+5. Open the **Backtest** tab, choose 5 years and click **Run backtest**. Read the results before anything else.
+6. Leave the engine running on trading days. The daily schedule is below.
+
+Building from source (Go 1.22+): `make deps && make test && make build`.
+
+---
+
+## A day in the engine's life (IST)
+
+| Time | Step | What happens |
 |---|---|---|
-| Any evening after 8 PM | Drop `watchlists/<next-trading-date>.csv` | Nothing yet |
-| ~08:30–09:10 | Open `http://127.0.0.1:8080/login` (through an SSH tunnel) and log in to Zerodha | Catches the redirect and stores today's token |
-| 08:30 | — | Loads the watchlist and instruments, then 10 days of 1-minute history (for RVOL and the EMA seed) |
-| 09:15–09:45 | — | Warmup: builds candles, VWAP and RVOL. No orders |
-| 09:45–14:45 | — | Trades |
-| 14:45–15:08 | — | Manages exits only |
-| 15:08 | — | Kill switch: flattens everything |
-| 15:09:30 | — | Sweep: asks the **broker** for any open MIS position or live tagged order and fixes it |
-| Evening | Read `journal/<date>.csv` | Sleeps until the next trading day |
+| 08:45 | **Prepare** | Waits for your Kite login. Reconciles the book with your Kite holdings and GTTs: a position sold while the engine was off gets booked as closed, and a missing stop is re-armed. If the previous evening's run was missed, it's run now to catch up. |
+| 09:20 | **Morning run** | 1) Sells positions flagged the evening before. 2) Sells anything that **gapped below its stop** (a GTT places a *limit* order, which a gap can skip past). 3) Buys the queued candidates, highest relative strength first, with a LIMIT order 0.5% above the ask. It skips a candidate if it opened > 2% above the signal close, opened below its stop, or is at the upper circuit. Every buy gets a GTT stop straight away. |
+| 09:20–15:30 | **Monitor** | Refreshes prices every minute. Detects when a GTT stop has filled and books the trade. Re-arms any stop that's missing, and sells at market if the price is below the stop with no GTT armed. |
+| 15:50 | **Evening run** | Once today's daily candle is final: raises stops (and modifies their GTTs), flags exits for the morning, checks the market regime, and scans the universe. The candidates are queued for the next trading day. |
 
-Watchlist format (header optional, up to 50 rows, `#` comments allowed):
-
-```csv
-symbol,benchmark
-RELIANCE,NIFTY ENERGY
-HDFCBANK,NIFTY BANK
-TCS,NIFTY IT
-INFY
-```
-
-`benchmark` is optional. It names an NSE sector index the radar also checks.
-Run `./engine -config config.yaml -check` after dropping a file to validate it.
-
-If the file is missing at 08:30, the engine keeps checking every minute until 14:45.
-If you haven't logged in, it logs the login URL every 5 minutes.
+The book (positions, pending candidates, cash, cooldowns) is saved in
+`data/portfolio.json`. You can stop and restart the engine at any time. Open
+positions stay protected by their GTTs at Zerodha while it's off.
 
 ---
 
-## Strategy, as implemented
+## Strategy
 
-**Entry** is evaluated on each closed 5-minute bar, and only between 09:45 and 14:45. Long rules:
+**Trend filter** (every candidate must pass):
+- close above the 50-day EMA, the 20-day EMA above the 50-day EMA, and the 50-day EMA rising over 5 sessions;
+- price at least ₹50;
+- average daily turnover at least ₹10 crore.
 
-1. The 10 EMA crossed above the 20 EMA on this bar or the previous one (`pullback_candles: 2`).
-2. The bar pulled back into the EMA band: `low ≤ max(EMA10, EMA20) × (1 + 0.15%)`.
-3. The bar closed back above the 10 EMA.
-4. `close > VWAP × 1.002`.
-5. `RVOL ≥ 1.5`. RVOL is today's cumulative volume divided by the 10-day average cumulative volume at the same minute, interpolated within the minute.
-6. The radar doesn't disagree: NIFTY 50, and the stock's benchmark if given, isn't bearish.
-7. Risk allows it: a free slot, enough margin, the daily loss limit not hit, and fewer than 3 trades today in this symbol.
+**Market regime:** new entries are allowed only while NIFTY 50 closes above a rising 50-day EMA. Open positions are always managed.
 
-Short is the mirror image. The EMAs are seeded from the previous sessions' 5-minute
-closes, so they're valid at 09:45 instead of after 20 bars (~11:00).
+**Setups** (on the completed daily candle):
+- **Breakout:** close above the prior 20-day high, on at least 1.5× average volume.
+- **Pullback:** the low touched the 20-day EMA (within 1%) in the last 3 sessions, and today closed above the 20-day EMA and above yesterday's high, on at least average volume.
 
-**Order used:** an IOC limit order 0.5% beyond the best ask or bid. It fills at the
-touch and never rests. The price cap satisfies SEBI's market-protection requirement.
+**Ranking:** 60-day return relative to NIFTY 50. Up to 5 positions in total, at most 2 new ones per day.
 
-**Position size:** `min(capital × 0.5% / stop_distance, capital × leverage / max_positions / price)`.
+**Position size:** the smallest of:
+- 1% of equity at risk ÷ (entry − stop);
+- 20% of equity ÷ price;
+- available cash.
 
-**Stops.** One SL-M order sits at the broker, so it survives an engine crash or a
-network loss. It only ever tightens:
+**Stops** (they only ever move up; R = entry − initial stop):
 
-| Stage | Trigger | Stop | Net result if hit |
-|---|---|---|---|
-| Initial | fill | 20 EMA, clamped to 0.25%–0.80% from entry | loss ≤ 0.80% + costs |
-| Breakeven | +0.40% gross | entry ± 0.15% | ≈ 0 (costs covered) |
-| Profit lock | +0.65% gross | entry ± 0.40% | **+0.25% net** |
-| Trailing | each 5-minute close after breakeven | max(lock, 10 EMA ∓ 0.25%) | ≥ locked level |
-
-You'll also see an exit **on a 5-minute close** on the wrong side of the 10 EMA,
-or at the 15:08 square-off.
-
-Why two stages instead of one: at +0.40% gross, a stop that locks 0.25% net would
-have to sit at +0.40%, which is the current price, so it would trigger at once.
-
----
-
-## Where this differs from the original spec, and why
-
-| Spec | Implementation | Reason |
+| Stage | When | Stop |
 |---|---|---|
-| Token bucket at 8 OPS via `time.Ticker` | Sliding-window log: ≤8 per 1.15 s, ≤350/min, ≤4,500/day | A token bucket with rate 8 and burst 8 lets **16** requests through in one second. The 150 ms guard absorbs dispatch jitter: the 50-agent stress test saw 10 calls in one second without it and ≤8 with it. |
-| Exceeding 10 OPS "suspends the account" | 8 OPS cap kept | Under SEBI's April 2026 retail-algo framework, going above 10 OPS means registering the strategy. Kite rejects the extra requests with HTTP 429. |
-| Unbuffered fan-out channels | Buffered mailboxes that drop the oldest tick | With unbuffered channels, one slow agent either stalls the WebSocket or loses nearly every tick. Volume and VWAP are cumulative in every tick, so dropping an old tick loses nothing. |
-| "Priority channel" | Explicit mutex-protected lanes | Go's `select` chooses randomly among ready channels, so it doesn't actually prioritise. |
-| Retry the stop update once, then flatten | Stop **placement** failure → flatten. Stop **modify** failure → check the resting stop; flatten only if it can't be confirmed live | A failed modify leaves the old stop in place, so the position isn't unprotected. |
-| Exit = cancel the stop, then send a market order | Exit = **modify the SL-M into a MARKET order** | Done as one operation, the stop and the exit can never both fill. Cancel-then-place is only the fallback. |
-| Trail on every 5-minute bar | Moves smaller than 0.05% are skipped; cancel-and-replace after 24 modifications | Kite allows 25 modifications per order. |
-| Kill switch at 15:10 | 15:08 (configurable) | Zerodha auto-squares stocks it classifies as CAS at 15:12. |
-| Tick-by-tick VWAP | Exchange ATP by default; own calculation available | Kite ticks are roughly 1-second snapshots, not individual trades. |
-| — | Entries queued longer than 10 s are dropped | When 50 stocks signal together, stops go first. An entry filled 10 s late is chasing. |
-| — | Ambiguous PLACE failures (timeout/5xx) are checked against the order book before any retry | The order may already exist at the broker. Retrying blindly can double an exit and leave you in a reversed position. |
-| — | The fill ledger decides the position | Any fill the engine didn't expect, or a restart mid-day, results in an *orphan*. The engine adopts it and flattens it. |
+| Initial | On entry | Entry − 2 × ATR(14), kept between 3% and 8% below entry |
+| Breakeven | Close ≥ entry + 1R | Entry + round-trip costs |
+| Locked | Close ≥ entry + 2R | Entry + 1R |
+| Trailing | After breakeven | Highest close − 3 × ATR (only if higher than the current stop) |
+
+**Exits:**
+- the stop is hit (GTT);
+- after breakeven, a close below the 20-day EMA → sell at the next morning run;
+- time stop: 40 sessions without reaching +1R;
+- cooldown: no re-entry in the same stock for 5 sessions after an exit.
+
+**Costs modelled:** Zerodha delivery charges.
+- brokerage ₹0;
+- STT 0.1% on both the buy and the sell;
+- stamp duty 0.015% on the buy;
+- NSE exchange charge 0.00307%, SEBI fee ₹10/crore, GST 18%;
+- DP charge ₹15.34 per sell;
+- plus 0.1% slippage per side.
+
+Every number above can be changed in `config.yaml`.
 
 ---
 
-## Rehearsal: the full flow against a simulated Kite (no market, no money)
+## Backtesting
 
-`tools/kitemock` pretends to be Kite: the login redirect, the session exchange (it
-verifies the SHA-256 checksum), profile, margins, the instrument master,
-historical minute candles, and a binary KiteTicker WebSocket. It plays a scripted
-~19-minute session with 1-minute candles:
+- **Control panel:** **Backtest** tab → choose the number of years → **Run backtest**. It uses today's Kite login to download daily candles and caches them in `data/candles/`, so later runs only fetch the new days.
+- **Command line:** `radha-backtest -years 5` downloads from Kite. `radha-backtest -csv ./history -years 5` works offline from CSV files (`date,open,high,low,close,volume`, one file per stock plus `NIFTY50.csv`).
 
-- **RADHAUP:** a long setup.
-- **RADHADN:** a short setup.
-- **RADHAFLAT:** must never trade.
-- **NOTAREALSTOCK:** must be skipped.
+The simulation, day by day:
+1. **At the open:** sell positions flagged the evening before, then buy candidates (with the same gap checks as live).
+2. **During the day:** a stop hit fills at the stop, or at the open if the stock gapped below it.
+3. **At the close:** raise stops, flag exits, scan for the next day.
 
-Run it on a weekday (the engine skips weekends):
+Output: headline figures (CAGR vs NIFTY, max drawdown, win rate, average win and loss, profit factor, expectancy in R, time in market, total charges), an equity curve plotted against the index, and every trade with the reason it exited. Files are written to `data/backtest/latest/` (or `-out`): `report.html`, `trades.csv`, `equity.csv`.
+
+---
+
+## Control panel
+
+| Area | What it shows |
+|---|---|
+| Checklist | Credentials, today's Kite login, universe, engine stage (with a **Retry** button after an error), the next three scheduled runs |
+| KPIs | Equity, cash, invested, realized P&L, positions / maximum, drawdown from peak, market regime |
+| Open positions | Entry, LTP, P&L, current R, stop and its stage, GTT status, next action (hold, or "SELL next morning: reason") |
+| Candidates | Tomorrow's queue with the reasons, plus the verdict for every stock in the last scan |
+| Backtest | Run a backtest; view figures, the equity curve vs NIFTY, the trades, and the full HTML report |
+| Trades | The journal, with monthly P&L and a cumulative total |
+| Universe | Edit the scanned stocks (up to 300 NSE symbols) |
+| Logs | Live log, filterable to warnings and errors |
+
+---
+
+## Going live — checklist
+
+1. The backtest over 5+ years is acceptable **after costs**, and you're comfortable with its maximum drawdown.
+2. At least 4–6 weeks of paper trading show behaviour consistent with the backtest.
+3. **DDPI is active** on your Zerodha account (or you authorise CDSL TPIN each day). Without it, API sells of holdings are rejected, which includes GTT stops.
+4. A static IPv4 address is registered in the Kite developer console, and `network.bind_ip` is set to it.
+5. `mode: live`. Start with small `risk.capital`.
+
+The engine only ever sells quantities **it bought itself**. Any other shares
+you hold, including extra shares of the same stock, are left alone.
+
+---
+
+## Rehearsal against a simulated Kite
+
+`tools/kitemock` simulates Kite's login, historical data and quotes, and plays a scripted day.
+- **SWUP** and **SWDN** break out and get bought in the morning run.
+- **SWDN** then falls 7% and its GTT stop fires.
+- The evening run manages the rest and scans for the next day.
 
 ```bash
-make build
-go run ./tools/kitemock -setup rehearsal     # writes rehearsal/config.yaml + today's watchlist, starts the mock
-./bin/engine -config rehearsal/config.yaml   # second terminal
-# open http://127.0.0.1:8080/login in your browser, then watch http://127.0.0.1:8080/status
+go run ./tools/kitemock -setup reh          # terminal 1 (writes reh/config.yaml with a compressed ~6-minute schedule)
+./bin/radha-engine -config reh/config.yaml  # terminal 2, then open http://127.0.0.1:8080/login
 ```
 
-Expected output, from a real run:
+Observed run:
 
 ```
-00:16:57 Kite session established            user=RK1234
-00:16:57 watchlist  NOTAREALSTOCK: not an NSE EQ instrument — skipped
-00:16:59 session prepared                    agents=3 indices=2 radar=permissive
-00:16:59 ticker connected                    instruments=5
-00:21:44 ENTRY signal  RADHAUP  LONG  qty=497  "cross+pullback, close 100.50 vwap 100.00 rvol 3.01"
-00:21:44 ENTRY signal  RADHADN  SHORT qty=502
-00:21:44 FILLED / stop live                  RADHAUP trigger=100.10, RADHADN trigger=99.90
-00:23:39 lock stage BREAKEVEN                stop → 100.75 / 99.25
-00:25:01 lock stage PROFIT_LOCK              stop → 101.00 / 99.00
-00:30:44 – 00:31:44 trailing                 stop → 101.15 / 98.85
-00:32:37 trade closed  RADHAUP net ₹178.14   stop hit (PROFIT_LOCK @ 101.15)
-00:32:37 trade closed  RADHADN net ₹181.51   stop hit (PROFIT_LOCK @ 98.85)
-00:34:44 SQUARE-OFF: kill switch → all agents HALTED
-00:35:14 sweep complete                      (broker flat, no live orders)
-00:36:15 session closed                      trades=2 realized=359.65 orders=11, 0 errors
+16:53:18 previous evening run was missed — catching up now
+16:53:23 evening run complete  candidates=3 regime=RISK-ON
+16:54:09 BOUGHT SWUP  21 @ 940.10  stop 902.30  risk ₹794   → stop GTT armed 902.25
+16:54:09 BOUGHT SWX02 37 @ 529.76  stop 510.48  risk ₹713   → stop GTT armed 510.45
+16:54:09 BOUGHT SWDN   5 @ 3431.72 stop 3319.22 risk ₹563   → stop GTT armed 3319.20
+16:56:09 stop GTT filled SWDN @ 3300.90 → TRADE CLOSED net −₹706.95 (−1.26R, gap between minute polls)
+16:58:13 evening run complete  positions=2 candidates=0
 ```
-
-The `dev:` overrides that point the engine at the mock are rejected when `mode: live` is set.
 
 ---
 
 ## Architecture
 
 ```
-KiteTicker WS ──► ticker.Multiplexer ──(drop-oldest mailbox)──► agent.Agent ×N ─┐
-      │ order postbacks                                                          │ OrderPayload
-      ▼                                                                          ▼
-ordermanager.UpdateRouter ◄── Reconciler (polls order book every 3s)   ordermanager.OrderManager
-      │ (dedup, terminal-state guard)                                   ├─ PriorityQueue P1>P2>P3
-      └──────────────► agent inbox (never dropped)                      ├─ RateLimiter 8/1.15s·350/min·4500/day
-                                                                        ├─ retries + PLACE de-dup
-radar.Radar (NIFTY 50 + sector indices) ──veto──► agent                 └─ broker.Kite (static-IP HTTP) | broker.Paper
-risk.Manager (sizing, slots, margin, daily breaker, journal) ◄──► agent
-engine.Engine: daily scheduler, login wait, 15:08 kill, 15:09:30 broker sweep, SIGTERM flatten
+cmd/engine            daemon + control panel (first run creates config.yaml / universe.csv)
+cmd/backtest          CLI backtester (Kite or CSV)
+internal/swing        strategy rules, sizing, costs, portfolio state, journal — shared by live and backtest
+internal/backtest     day-loop simulator + HTML/CSV report
+internal/engine       schedule: prepare → morning → monitor → evening; reconciliation; backtest runner
+internal/data         universe, instruments, cached daily candles (chunked, paced under Kite limits)
+internal/broker       Kite (CNC orders, GTT, holdings, quotes, history) · Paper (simulated account) · static-IP client
+internal/ordermanager priority queue (emergency > stop > entry), sliding-window limiter, retries, GTT de-duplication
+internal/indicators   EMA, Wilder ATR, SMA, prior N-day high
+internal/auth         daily Kite login (redirect flow), token + credential storage
+internal/web          control panel (embedded HTML/JS)
+tools/kitemock        Kite simulator for rehearsals
 ```
-
-```
-cmd/engine/main.go            flags, logging, signal handling
-internal/engine               daily lifecycle, kill switch, safety sweep, /status
-internal/agent                stock_agent.go (state machine), strategy.go (pure maths)
-internal/indicators           EMA, VWAP, RVOL profile, candle builder
-internal/ordermanager         rate_limiter.go, priority_queue.go, order_manager.go, router.go
-internal/ticker               WebSocket multiplexer
-internal/broker               Trader/MarketData interfaces, Kite, Paper, static-IP client
-internal/{auth,risk,radar,history,watchlist,clock,config}
-pkg/models                    shared types
-```
-
-Each agent's state (`FLAT → PENDING_ENTRY → IN_POSITION → TRAILING → PENDING_EXIT → FLAT/HALTED`)
-is owned by its own goroutine, so the hot path has no locks. Status snapshots
-use an `RWMutex`.
-
----
-
-## Setup
-
-1. **Kite Connect app** at developers.kite.trade:
-   - Set the redirect URL to `http://127.0.0.1:8080/kite/callback`.
-   - Whitelist your VPS's static IPv4 under IP Whitelist.
-2. **VPS** with a static IPv4 (any Indian region). Go 1.22 or later.
-3. Build:
-   ```bash
-   make deps     # go mod tidy — fetches gokiteconnect + yaml and writes go.sum
-   make test     # unit + end-to-end simulation tests (race detector on)
-   make build    # → bin/engine
-   ```
-4. `cp config.example.yaml config.yaml`, then set `api_key` and `bind_ip`. Fill in `holidays` from NSE's circular.
-5. `export KITE_API_SECRET=...`. With systemd, put it in `/etc/kitealgo.env` instead.
-6. `sudo cp deploy/kitealgo.service /etc/systemd/system/ && sudo systemctl enable --now kitealgo`
-7. Each morning: `ssh -L 8080:127.0.0.1:8080 you@vps`, open `http://127.0.0.1:8080/login`, log in. Check progress at `/status`.
-
-`/status` returns JSON: phase, risk (P&L, open slots, halt reason), order-manager
-counters and remaining rate budget, ticker mailbox depth and drops, and each
-agent's state, VWAP, EMAs, RVOL, position and last signal verdict.
-
----
 
 ## Tests
 
-- **`internal/agent`**: runs full sessions against the paper broker with the real order manager and router.
-  - Winning trade: breakeven → profit lock → trailing → stop exit.
-  - Losing trade: initial stop hit.
-  - Kill switch mid-trade.
-  - Stop placement that fails twice: the position is flattened.
-  - 50 agents at once: no 1-second window above 8 broker calls, and everything is flat after the kill.
-- **`internal/ordermanager`**:
-  - The limiter never exceeds its cap in any window; the token-bucket counter-example.
-  - Priority ordering; kill switch drops entries.
-  - Stop retry budget.
-  - Ambiguous PLACE de-duplicated (the exit executes exactly once).
-  - Router de-duplication and the terminal-state guard.
-- **Other packages**: indicator maths, lock levels, stop clamps, entry rules, risk sizing and breaker, radar modes, watchlist parsing, token expiry at 06:00, config validation.
-
-## Known limits
-
-- Paper fills are pessimistic (far side of the book + 2 bps). They are not an exchange queue model.
-- After a mid-day restart the engine **flattens** positions it finds from earlier orders; it doesn't resume managing them. Per-symbol trade counts reset on restart.
-- The radar reads index trend from the day's open and the 5-minute EMAs; index ticks carry no volume, so there's no index VWAP.
-- The 0.15% cost model is a flat percentage. Real brokerage is capped at ₹20 per order, so percentage costs fall as trade size grows.
+`make test` runs:
+- **Indicators:** EMA, ATR and highs.
+- **Strategy:** breakout detection, no longs in downtrends, the liquidity filter, the breakeven → lock → trail ratchet, the stop never moving down, sizing limits, delivery charges to the paisa.
+- **Backtester:** invariants (cash never negative, position cap respected, no overlapping trades, every trade pays charges) and gap-through-stop fills at the open.
+- **Order manager:** limiter caps, priority order, retry budget, buy/sell round trip.
+- **Candle cache:** incremental downloads, chunking.
+- **Control panel API**, config validation, token expiry.

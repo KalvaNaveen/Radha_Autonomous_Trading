@@ -114,7 +114,6 @@ func (m *OrderManager) EntriesBlocked() bool { return m.entriesBlocked.Load() }
 func (m *OrderManager) reply(p *models.OrderPayload, r models.OrderResult) {
 	r.PayloadID = p.ID
 	r.Action = p.Action
-	r.Purpose = p.Purpose
 	if r.BrokerOrderID == "" {
 		r.BrokerOrderID = p.BrokerOrderID
 	}
@@ -124,7 +123,7 @@ func (m *OrderManager) reply(p *models.OrderPayload, r models.OrderResult) {
 	select {
 	case p.Reply <- r:
 	default:
-		m.log.Error("reply channel full — result dropped", "payload", p.ID, "purpose", p.Purpose)
+		m.log.Error("reply channel full — result dropped", "payload", p.ID, "action", p.Action)
 	}
 }
 
@@ -211,7 +210,7 @@ func (m *OrderManager) execute(ctx context.Context, p *models.OrderPayload) {
 	// calls: abandoning a stop placement half-way is worse than finishing it.
 	callCtx := context.WithoutCancel(ctx)
 	attempts := m.maxAttempts(p)
-	backoff := m.cfg.StopRetryBackoff
+	backoff := m.cfg.RetryBackoff
 	if backoff <= 0 {
 		backoff = 100 * time.Millisecond
 	}
@@ -229,20 +228,28 @@ func (m *OrderManager) execute(ctx context.Context, p *models.OrderPayload) {
 		start := time.Now()
 		id, err := m.call(callCtx, p)
 		if err == nil {
-			if p.Action == models.ActionPlace {
+			if p.Action == models.ActionPlace || p.Action == models.ActionGTTPlace {
 				m.known.Store(id, struct{}{})
 			}
 			m.count(p.Action)
-			m.log.Debug("order op ok", "action", p.Action, "purpose", p.Purpose, "prio", p.Priority,
+			m.log.Debug("order op ok", "action", p.Action, "prio", p.Priority,
 				"symbol", p.Request.TradingSymbol, "order_id", id, "attempt", i, "rtt", time.Since(start))
 			m.reply(p, models.OrderResult{BrokerOrderID: id, Attempts: i})
 			return
 		}
 		lastErr = err
 		outcome := broker.Classify(err)
-		m.log.Warn("order op failed", "action", p.Action, "purpose", p.Purpose, "prio", p.Priority,
+		m.log.Warn("order op failed", "action", p.Action, "prio", p.Priority,
 			"symbol", p.Request.TradingSymbol, "attempt", i, "outcome", outcome, "err", err)
 
+		if outcome == broker.OutcomeAmbiguous && p.Action == models.ActionGTTPlace {
+			if found, ok := m.findGTT(callCtx, p); ok {
+				m.known.Store(found, struct{}{})
+				m.deduped.Add(1)
+				m.reply(p, models.OrderResult{BrokerOrderID: found, Attempts: i})
+				return
+			}
+		}
 		if outcome == broker.OutcomeAmbiguous && p.Action == models.ActionPlace {
 			// The order may exist. Never blindly re-place: look for it first.
 			if found, ok := m.findPlaced(callCtx, p, start); ok {
@@ -270,8 +277,51 @@ func (m *OrderManager) call(ctx context.Context, p *models.OrderPayload) (string
 		return p.BrokerOrderID, m.trader.ModifyOrder(ctx, p.BrokerOrderID, p.Request)
 	case models.ActionCancel:
 		return p.BrokerOrderID, m.trader.CancelOrder(ctx, p.BrokerOrderID)
+	case models.ActionGTTPlace:
+		return m.trader.PlaceGTT(ctx, p.Request)
+	case models.ActionGTTModify:
+		return p.BrokerOrderID, m.trader.ModifyGTT(ctx, p.BrokerOrderID, p.Request)
+	case models.ActionGTTDelete:
+		return p.BrokerOrderID, m.trader.DeleteGTT(ctx, p.BrokerOrderID)
 	}
 	return "", fmt.Errorf("unknown action %v", p.Action)
+}
+
+// findGTT looks for an active GTT matching an ambiguous GTT placement.
+func (m *OrderManager) findGTT(ctx context.Context, p *models.OrderPayload) (string, bool) {
+	time.Sleep(150 * time.Millisecond)
+	gs, err := m.trader.GTTs(ctx)
+	if err != nil {
+		return "", false
+	}
+	for _, g := range gs {
+		if g.Status != models.GTTActive || g.TradingSymbol != p.Request.TradingSymbol || g.Quantity != p.Request.Quantity {
+			continue
+		}
+		if _, seen := m.known.Load(g.ID); seen {
+			continue
+		}
+		if d := g.TriggerPrice - p.Request.TriggerPrice; d > 0.01 || d < -0.01 {
+			continue
+		}
+		return g.ID, true
+	}
+	return "", false
+}
+
+// Do submits a payload and waits for its result (or ctx).
+func (m *OrderManager) Do(ctx context.Context, p *models.OrderPayload) models.OrderResult {
+	reply := make(chan models.OrderResult, 1)
+	p.Reply = reply
+	if err := m.Submit(p); err != nil {
+		return models.OrderResult{Err: err}
+	}
+	select {
+	case r := <-reply:
+		return r
+	case <-ctx.Done():
+		return models.OrderResult{Err: ctx.Err()}
+	}
 }
 
 // findPlaced searches the order book for an order matching p that this engine

@@ -1,4 +1,4 @@
-// Package config loads and validates the engine configuration (YAML).
+// Package config loads and validates the swing engine configuration (YAML).
 package config
 
 import (
@@ -13,222 +13,174 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the root configuration object.
+// Config is the root configuration.
 type Config struct {
-	Mode     string         `yaml:"mode"` // "live" or "paper"
+	Mode     string         `yaml:"mode"` // "paper" or "live"
 	Kite     KiteConfig     `yaml:"kite"`
 	Network  NetworkConfig  `yaml:"network"`
 	Paths    PathsConfig    `yaml:"paths"`
 	Session  SessionConfig  `yaml:"session"`
 	Strategy StrategyConfig `yaml:"strategy"`
 	Risk     RiskConfig     `yaml:"risk"`
+	Costs    CostsConfig    `yaml:"costs"`
 	Orders   OrdersConfig   `yaml:"orders"`
-	Radar    RadarConfig    `yaml:"radar"`
-	Ticker   TickerConfig   `yaml:"ticker"`
+	Market   MarketConfig   `yaml:"market"`
+	Backtest BacktestConfig `yaml:"backtest"`
 	Server   ServerConfig   `yaml:"server"`
-	Holidays []string       `yaml:"holidays"` // YYYY-MM-DD, NSE trading holidays
+	Holidays []string       `yaml:"holidays"`
 	Dev      DevConfig      `yaml:"dev"`
 }
 
-// DevConfig points the engine at a Kite simulator (tools/kitemock) for
-// end-to-end rehearsals. Leave empty in real use. Refused in live mode.
-type DevConfig struct {
-	APIRoot   string `yaml:"api_root"`   // e.g. http://127.0.0.1:9000  (default https://api.kite.trade)
-	LoginRoot string `yaml:"login_root"` // e.g. http://127.0.0.1:9000  (default https://kite.zerodha.com)
-	TickerURL string `yaml:"ticker_url"` // e.g. ws://127.0.0.1:9000/ws (default wss://ws.kite.trade)
-}
-
-// KiteConfig holds API credentials. The secret may come from the environment.
+// KiteConfig holds API credentials (they can also be entered in the control panel).
 type KiteConfig struct {
-	APIKey    string `yaml:"api_key"`
-	APISecret string `yaml:"api_secret"` // or env KITE_API_SECRET
-	// AccessToken optionally pins a token (e.g. for testing). Normally empty:
-	// the daily login flow stores the token in Paths.TokenFile.
+	APIKey      string `yaml:"api_key"`
+	APISecret   string `yaml:"api_secret"`
 	AccessToken string `yaml:"access_token"`
 }
 
 // NetworkConfig binds order traffic to the SEBI-whitelisted static IP.
 type NetworkConfig struct {
-	// BindIP is the local IPv4 address the REST client dials from. It must be
-	// the static IP registered in the Kite developer console. Empty = OS default
-	// (only correct if the host has exactly one public IP and it is the registered one).
 	BindIP         string        `yaml:"bind_ip"`
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 }
 
 // PathsConfig holds filesystem locations.
 type PathsConfig struct {
-	WatchlistDir string `yaml:"watchlist_dir"`
-	DataDir      string `yaml:"data_dir"` // history cache, token file
+	UniverseFile string `yaml:"universe_file"` // symbols the scanner may trade
+	DataDir      string `yaml:"data_dir"`      // token, caches, portfolio state
 	JournalDir   string `yaml:"journal_dir"`
 	LogFile      string `yaml:"log_file"`
 }
 
-// SessionConfig holds the IST clock times. All strings are "HH:MM:SS".
+// SessionConfig holds the daily schedule in IST ("HH:MM:SS").
 type SessionConfig struct {
-	PrepareAt    string `yaml:"prepare_at"`    // load watchlist + history
-	MarketOpen   string `yaml:"market_open"`   // 09:15:00
-	TradingStart string `yaml:"trading_start"` // 09:45:00 end of warmup
-	EntryCutoff  string `yaml:"entry_cutoff"`  // 14:45:00 exit-only after this
-	SquareOff    string `yaml:"square_off"`    // kill switch
-	SafetySweep  string `yaml:"safety_sweep"`  // verify flat at broker
-	SessionEnd   string `yaml:"session_end"`   // shut the day down
+	PrepareAt  string `yaml:"prepare_at"`  // login check, reconcile holdings
+	MorningRun string `yaml:"morning_run"` // gap checks, planned exits, new entries
+	MarketOpen string `yaml:"market_open"`
+	MarketEnd  string `yaml:"market_close"`
+	EveningRun string `yaml:"evening_run"` // daily candles final: manage stops, scan
 }
 
-// StrategyConfig holds the signal parameters.
+// StrategyConfig holds the daily swing rules.
 type StrategyConfig struct {
-	CandleInterval       time.Duration `yaml:"candle_interval"`         // 5m
-	CandleGrace          time.Duration `yaml:"candle_grace"`            // wait for late ticks before closing a bar
-	FastEMA              int           `yaml:"fast_ema"`                // 10
-	SlowEMA              int           `yaml:"slow_ema"`                // 20
-	VWAPBufferPct        float64       `yaml:"vwap_buffer_pct"`         // 0.20
-	VWAPSource           string        `yaml:"vwap_source"`             // "exchange" | "computed"
-	MinRVOL              float64       `yaml:"min_rvol"`                // 1.5
-	RVOLLookbackDays     int           `yaml:"rvol_lookback_days"`      // 10
-	BandTolerancePct     float64       `yaml:"band_tolerance_pct"`      // 0.15
-	PullbackCandles      int           `yaml:"pullback_candles"`        // 2 (incl. the crossover bar)
-	MaxStopPct           float64       `yaml:"max_stop_pct"`            // 0.80
-	MinStopPct           float64       `yaml:"min_stop_pct"`            // 0.25
-	RoundTripCostPct     float64       `yaml:"round_trip_cost_pct"`     // 0.15
-	BreakevenTriggerPct  float64       `yaml:"breakeven_trigger_pct"`   // 0.40 gross
-	ProfitLockTriggerPct float64       `yaml:"profit_lock_trigger_pct"` // 0.65 gross
-	MinNetProfitPct      float64       `yaml:"min_net_profit_pct"`      // 0.25 net → stop at entry ± (0.25+0.15)
-	TrailBufferPct       float64       `yaml:"trail_buffer_pct"`        // 0.25 below/above 10 EMA
-	MinStopStepPct       float64       `yaml:"min_stop_step_pct"`       // 0.05 (saves Kite's 25-mod budget)
-	MaxTradesPerSymbol   int           `yaml:"max_trades_per_symbol"`
-	CooldownCandles      int           `yaml:"cooldown_candles"`
-	EntryTimeout         time.Duration `yaml:"entry_timeout"`
+	EMAFast          int     `yaml:"ema_fast"`          // 20
+	EMASlow          int     `yaml:"ema_slow"`          // 50
+	ATRPeriod        int     `yaml:"atr_period"`        // 14
+	VolumeAvgPeriod  int     `yaml:"volume_avg_period"` // 20
+	BreakoutLookback int     `yaml:"breakout_lookback"` // 20-day high
+	BreakoutVolRatio float64 `yaml:"breakout_volume_ratio"`
+	PullbackLookback int     `yaml:"pullback_lookback"` // bars in which the low must touch EMA20
+	PullbackTolPct   float64 `yaml:"pullback_tolerance_pct"`
+	PullbackVolRatio float64 `yaml:"pullback_volume_ratio"`
+	SlopeLookback    int     `yaml:"slope_lookback"`      // EMA50 must be rising over this many bars
+	StopATRMult      float64 `yaml:"stop_atr_mult"`       // 2.0
+	MinStopPct       float64 `yaml:"min_stop_pct"`        // 3
+	MaxStopPct       float64 `yaml:"max_stop_pct"`        // 8
+	BreakevenR       float64 `yaml:"breakeven_r"`         // 1.0
+	LockR            float64 `yaml:"lock_r"`              // 2.0 → stop to +1R
+	TrailATRMult     float64 `yaml:"trail_atr_mult"`      // 3.0 (chandelier)
+	ExitBelowEMAFast bool    `yaml:"exit_below_ema_fast"` // after breakeven, close < EMA20 → exit
+	MaxHoldBars      int     `yaml:"max_hold_bars"`       // time stop for trades going nowhere
+	TimeStopMinR     float64 `yaml:"time_stop_min_r"`     // …if they have not reached this R
+	MinPrice         float64 `yaml:"min_price"`
+	MinTurnoverCr    float64 `yaml:"min_turnover_cr"` // average daily turnover, ₹ crore
+	MaxGapUpPct      float64 `yaml:"max_gap_up_pct"`  // skip entries that open this far above the signal close
+	RSLookback       int     `yaml:"rs_lookback"`     // relative-strength window, bars
+	CooldownBars     int     `yaml:"cooldown_bars"`   // wait after an exit before re-entering the symbol
 }
 
-// RiskConfig holds portfolio-level limits.
+// RiskConfig holds portfolio limits.
 type RiskConfig struct {
-	Capital           float64       `yaml:"capital"`              // ₹ allocated to the engine
-	RiskPerTradePct   float64       `yaml:"risk_per_trade_pct"`   // 0.5 (% of capital lost if stopped at initial SL)
-	MaxOpenPositions  int           `yaml:"max_open_positions"`   // 10
-	MISLeverage       float64       `yaml:"mis_leverage"`         // 5 (conservative planning figure)
-	DailyLossLimitPct float64       `yaml:"daily_loss_limit_pct"` // 2.0 → flatten all + halt
-	MarginBufferPct   float64       `yaml:"margin_buffer_pct"`    // keep 10% of margin unused
-	MarginRefresh     time.Duration `yaml:"margin_refresh"`
+	Capital          float64 `yaml:"capital"`            // ₹ the engine may deploy (paper: starting cash)
+	RiskPerTradePct  float64 `yaml:"risk_per_trade_pct"` // equity lost if the initial stop is hit
+	MaxPositionPct   float64 `yaml:"max_position_pct"`   // max % of equity in one stock
+	MaxPositions     int     `yaml:"max_positions"`
+	MaxNewPerDay     int     `yaml:"max_new_per_day"`
+	DrawdownPausePct float64 `yaml:"drawdown_pause_pct"` // no new entries while equity is this far below its peak
+}
+
+// CostsConfig models Zerodha equity-delivery charges.
+type CostsConfig struct {
+	BrokeragePct float64 `yaml:"brokerage_pct"`  // 0 for delivery
+	STTPct       float64 `yaml:"stt_pct"`        // 0.1 each side
+	StampBuyPct  float64 `yaml:"stamp_buy_pct"`  // 0.015 on buys
+	ExchangePct  float64 `yaml:"exchange_pct"`   // 0.00307 NSE
+	SEBIPerCrore float64 `yaml:"sebi_per_crore"` // ₹10
+	GSTPct       float64 `yaml:"gst_pct"`        // 18 on brokerage+exchange+SEBI
+	DPPerSell    float64 `yaml:"dp_per_sell"`    // ₹ per scrip per sell day
+	SlippagePct  float64 `yaml:"slippage_pct"`   // backtest/paper fill slippage per side
 }
 
 // OrdersConfig holds order-manager parameters.
 type OrdersConfig struct {
-	MaxOPS              int           `yaml:"max_ops"`                // 8 (SEBI threshold is 10)
-	MaxPerMinute        int           `yaml:"max_per_minute"`         // 350 (Kite: 400)
-	MaxPerDay           int           `yaml:"max_per_day"`            // 4500 (Kite: 5000)
-	EmergencyReserve    int           `yaml:"emergency_reserve"`      // daily orders kept back for exits
-	Workers             int           `yaml:"workers"`                // concurrent in-flight REST calls
-	StopRetryBackoff    time.Duration `yaml:"stop_retry_backoff"`     // 100ms
-	EmergencyRetries    int           `yaml:"emergency_retries"`      // 3
-	MarketProtection    float64       `yaml:"market_protection"`      // -1 = Kite auto, else percent
-	EntryLimitBufferPct float64       `yaml:"entry_limit_buffer_pct"` // 0.5 beyond best bid/ask
-	MaxModsPerOrder     int           `yaml:"max_mods_per_order"`     // 24 (Kite: 25) then cancel-and-replace
-	ReconcileInterval   time.Duration `yaml:"reconcile_interval"`
-	// EntryMaxAge drops entries that waited in the queue longer than this
-	// (e.g. 50 simultaneous signals at 8 OPS): a stale signal is not a signal.
-	EntryMaxAge time.Duration `yaml:"entry_max_age"`
+	MaxOPS              int           `yaml:"max_ops"`
+	MaxPerMinute        int           `yaml:"max_per_minute"`
+	MaxPerDay           int           `yaml:"max_per_day"`
+	EmergencyReserve    int           `yaml:"emergency_reserve"`
+	Workers             int           `yaml:"workers"`
+	RetryBackoff        time.Duration `yaml:"retry_backoff"`
+	EmergencyRetries    int           `yaml:"emergency_retries"`
+	MarketProtection    float64       `yaml:"market_protection"`
+	EntryLimitBufferPct float64       `yaml:"entry_limit_buffer_pct"` // entry limit above the ask
+	GTTLimitBufferPct   float64       `yaml:"gtt_limit_buffer_pct"`   // stop GTT limit below the trigger
+	FillTimeout         time.Duration `yaml:"fill_timeout"`
+	EntryMaxAge         time.Duration `yaml:"entry_max_age"`
 }
 
-// RadarConfig configures the market-context filter.
-type RadarConfig struct {
-	MarketIndex string `yaml:"market_index"` // "NIFTY 50"
-	// Mode: "strict" requires the benchmark to agree; "permissive" only blocks
-	// trades against a benchmark that clearly disagrees (neutral is allowed).
-	Mode       string  `yaml:"mode"`
-	NeutralPct float64 `yaml:"neutral_pct"` // |ltp-open|/open below this = neutral
+// MarketConfig holds the market-regime filter.
+type MarketConfig struct {
+	Index        string `yaml:"index"`         // "NIFTY 50"
+	RegimeFilter bool   `yaml:"regime_filter"` // new longs only while the index closes above its slow EMA
 }
 
-// TickerConfig configures the WebSocket fan-out.
-type TickerConfig struct {
-	AgentBuffer       int           `yaml:"agent_buffer"`
-	ReconnectMaxDelay time.Duration `yaml:"reconnect_max_delay"`
-	StaleAfter        time.Duration `yaml:"stale_after"` // no ticks for this long = feed alarm
+// BacktestConfig holds defaults for the backtester.
+type BacktestConfig struct {
+	Years int `yaml:"years"`
 }
 
-// ServerConfig is the local HTTP server (daily login callback + status).
+// ServerConfig is the local control panel.
 type ServerConfig struct {
-	Listen string `yaml:"listen"` // e.g. ":8080"
-	// PublicURL is how you reach this server from your browser. The Kite app's
-	// redirect URL must be set to PublicURL + "/kite/callback".
+	Listen    string `yaml:"listen"`
 	PublicURL string `yaml:"public_url"`
 }
 
-// Defaults returns a fully populated configuration with the strategy's spec values.
+// DevConfig points the engine at a Kite simulator. Refused in live mode.
+type DevConfig struct {
+	APIRoot   string `yaml:"api_root"`
+	LoginRoot string `yaml:"login_root"`
+}
+
+// Defaults returns the full default configuration.
 func Defaults() Config {
 	return Config{
 		Mode:    "paper",
-		Network: NetworkConfig{RequestTimeout: 5 * time.Second},
-		Paths: PathsConfig{
-			WatchlistDir: "watchlists",
-			DataDir:      "data",
-			JournalDir:   "journal",
-		},
-		Session: SessionConfig{
-			PrepareAt:    "08:30:00",
-			MarketOpen:   "09:15:00",
-			TradingStart: "09:45:00",
-			EntryCutoff:  "14:45:00",
-			SquareOff:    "15:08:00",
-			SafetySweep:  "15:09:30",
-			SessionEnd:   "15:35:00",
-		},
+		Network: NetworkConfig{RequestTimeout: 10 * time.Second},
+		Paths:   PathsConfig{UniverseFile: "universe.csv", DataDir: "data", JournalDir: "journal", LogFile: "logs/engine.log"},
+		Session: SessionConfig{PrepareAt: "08:45:00", MorningRun: "09:20:00", MarketOpen: "09:15:00",
+			MarketEnd: "15:30:00", EveningRun: "15:50:00"},
 		Strategy: StrategyConfig{
-			CandleInterval:       5 * time.Minute,
-			CandleGrace:          2 * time.Second,
-			FastEMA:              10,
-			SlowEMA:              20,
-			VWAPBufferPct:        0.20,
-			VWAPSource:           "exchange",
-			MinRVOL:              1.5,
-			RVOLLookbackDays:     10,
-			BandTolerancePct:     0.15,
-			PullbackCandles:      2,
-			MaxStopPct:           0.80,
-			MinStopPct:           0.25,
-			RoundTripCostPct:     0.15,
-			BreakevenTriggerPct:  0.40,
-			ProfitLockTriggerPct: 0.65,
-			MinNetProfitPct:      0.25,
-			TrailBufferPct:       0.25,
-			MinStopStepPct:       0.05,
-			MaxTradesPerSymbol:   3,
-			CooldownCandles:      1,
-			EntryTimeout:         15 * time.Second,
+			EMAFast: 20, EMASlow: 50, ATRPeriod: 14, VolumeAvgPeriod: 20,
+			BreakoutLookback: 20, BreakoutVolRatio: 1.5,
+			PullbackLookback: 3, PullbackTolPct: 1.0, PullbackVolRatio: 1.0, SlopeLookback: 5,
+			StopATRMult: 2.0, MinStopPct: 3, MaxStopPct: 8,
+			BreakevenR: 1.0, LockR: 2.0, TrailATRMult: 3.0, ExitBelowEMAFast: true,
+			MaxHoldBars: 40, TimeStopMinR: 1.0,
+			MinPrice: 50, MinTurnoverCr: 10, MaxGapUpPct: 2.0, RSLookback: 60, CooldownBars: 5,
 		},
-		Risk: RiskConfig{
-			Capital:           100000,
-			RiskPerTradePct:   0.5,
-			MaxOpenPositions:  10,
-			MISLeverage:       5,
-			DailyLossLimitPct: 2.0,
-			MarginBufferPct:   10,
-			MarginRefresh:     30 * time.Second,
-		},
-		Orders: OrdersConfig{
-			MaxOPS:              8,
-			MaxPerMinute:        350,
-			MaxPerDay:           4500,
-			EmergencyReserve:    300,
-			Workers:             8,
-			StopRetryBackoff:    100 * time.Millisecond,
-			EmergencyRetries:    3,
-			MarketProtection:    -1,
-			EntryLimitBufferPct: 0.5,
-			MaxModsPerOrder:     24,
-			ReconcileInterval:   3 * time.Second,
-			EntryMaxAge:         10 * time.Second,
-		},
-		Radar: RadarConfig{MarketIndex: "NIFTY 50", Mode: "permissive", NeutralPct: 0.10},
-		Ticker: TickerConfig{
-			AgentBuffer:       512,
-			ReconnectMaxDelay: 10 * time.Second,
-			StaleAfter:        30 * time.Second,
-		},
-		Server: ServerConfig{Listen: "127.0.0.1:8080", PublicURL: "http://127.0.0.1:8080"},
+		Risk: RiskConfig{Capital: 100000, RiskPerTradePct: 1.0, MaxPositionPct: 20, MaxPositions: 5,
+			MaxNewPerDay: 2, DrawdownPausePct: 15},
+		Costs: CostsConfig{BrokeragePct: 0, STTPct: 0.1, StampBuyPct: 0.015, ExchangePct: 0.00307,
+			SEBIPerCrore: 10, GSTPct: 18, DPPerSell: 15.34, SlippagePct: 0.10},
+		Orders: OrdersConfig{MaxOPS: 8, MaxPerMinute: 200, MaxPerDay: 2000, EmergencyReserve: 100, Workers: 4,
+			RetryBackoff: 200 * time.Millisecond, EmergencyRetries: 3, MarketProtection: -1,
+			EntryLimitBufferPct: 0.5, GTTLimitBufferPct: 1.0, FillTimeout: 20 * time.Second, EntryMaxAge: 2 * time.Minute},
+		Market:   MarketConfig{Index: "NIFTY 50", RegimeFilter: true},
+		Backtest: BacktestConfig{Years: 5},
+		Server:   ServerConfig{Listen: "127.0.0.1:8080", PublicURL: "http://127.0.0.1:8080"},
 	}
 }
 
-// Load reads the YAML file at path on top of Defaults() and validates it.
+// Load reads YAML on top of Defaults() and validates.
 func Load(path string) (Config, error) {
 	cfg := Defaults()
 	raw, err := os.ReadFile(path)
@@ -247,39 +199,39 @@ func Load(path string) (Config, error) {
 	return cfg, cfg.Validate()
 }
 
-// Validate checks internal consistency. It is deliberately strict: a bad
-// config should stop the engine before 09:15, not during the session.
+// Validate checks consistency.
 func (c Config) Validate() error {
 	var errs []error
-	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
-
+	add := func(f string, a ...any) { errs = append(errs, fmt.Errorf(f, a...)) }
 	if c.Mode != "live" && c.Mode != "paper" {
 		add("mode must be live or paper, got %q", c.Mode)
 	}
-	// kite.api_key / api_secret may also be entered in the web UI, so their
-	// absence is reported there rather than failing startup.
 	if c.Network.BindIP != "" {
-		ip := net.ParseIP(c.Network.BindIP)
-		if ip == nil || ip.To4() == nil {
+		if ip := net.ParseIP(c.Network.BindIP); ip == nil || ip.To4() == nil {
 			add("network.bind_ip %q is not a valid IPv4 address", c.Network.BindIP)
 		}
 	} else if c.Mode == "live" {
 		add("network.bind_ip is required in live mode (SEBI static-IP whitelisting)")
 	}
-	if c.Mode == "live" && (c.Dev.APIRoot != "" || c.Dev.LoginRoot != "" || c.Dev.TickerURL != "") {
+	if c.Mode == "live" && (c.Dev.APIRoot != "" || c.Dev.LoginRoot != "") {
 		add("dev.* overrides are not allowed in live mode")
 	}
+	s := c.Strategy
+	if s.EMAFast < 2 || s.EMASlow <= s.EMAFast || s.ATRPeriod < 2 || s.VolumeAvgPeriod < 2 || s.BreakoutLookback < 2 {
+		add("strategy: periods must be >= 2 and ema_fast < ema_slow")
+	}
+	if s.MinStopPct <= 0 || s.MaxStopPct < s.MinStopPct || s.StopATRMult <= 0 {
+		add("strategy: need 0 < min_stop_pct <= max_stop_pct and stop_atr_mult > 0")
+	}
+	if s.BreakevenR <= 0 || s.LockR <= s.BreakevenR {
+		add("strategy: need 0 < breakeven_r < lock_r")
+	}
+	r := c.Risk
+	if r.Capital <= 0 || r.RiskPerTradePct <= 0 || r.RiskPerTradePct > 5 || r.MaxPositions < 1 || r.MaxPositionPct <= 0 || r.MaxPositionPct > 100 {
+		add("risk: capital > 0, 0 < risk_per_trade_pct <= 5, max_positions >= 1, 0 < max_position_pct <= 100")
+	}
 	if c.Orders.MaxOPS < 1 || c.Orders.MaxOPS >= 10 {
-		add("orders.max_ops must be 1..9 (SEBI registration threshold is 10 OPS), got %d", c.Orders.MaxOPS)
-	}
-	if c.Orders.MaxPerMinute < 1 || c.Orders.MaxPerMinute > 400 {
-		add("orders.max_per_minute must be 1..400")
-	}
-	if c.Orders.MaxPerDay < 1 || c.Orders.MaxPerDay > 5000 {
-		add("orders.max_per_day must be 1..5000")
-	}
-	if c.Orders.MaxModsPerOrder < 1 || c.Orders.MaxModsPerOrder > 25 {
-		add("orders.max_mods_per_order must be 1..25")
+		add("orders.max_ops must be 1..9 (SEBI registration threshold is 10 OPS)")
 	}
 	if c.Orders.MarketProtection == 0 {
 		add("orders.market_protection must be non-zero (Kite rejects 0); use -1 for auto")
@@ -287,43 +239,13 @@ func (c Config) Validate() error {
 	if c.Orders.Workers < 1 {
 		add("orders.workers must be >= 1")
 	}
-	s := c.Strategy
-	if s.FastEMA < 1 || s.SlowEMA <= s.FastEMA {
-		add("strategy: need 1 <= fast_ema < slow_ema")
-	}
-	if s.MinStopPct <= 0 || s.MaxStopPct < s.MinStopPct {
-		add("strategy: need 0 < min_stop_pct <= max_stop_pct")
-	}
-	if s.BreakevenTriggerPct <= s.RoundTripCostPct {
-		add("strategy: breakeven_trigger_pct must exceed round_trip_cost_pct")
-	}
-	lockStop := s.MinNetProfitPct + s.RoundTripCostPct
-	if s.ProfitLockTriggerPct <= lockStop {
-		add("strategy: profit_lock_trigger_pct (%.2f) must exceed min_net_profit_pct+round_trip_cost_pct (%.2f), otherwise the lock stop sits at market", s.ProfitLockTriggerPct, lockStop)
-	}
-	if s.VWAPSource != "exchange" && s.VWAPSource != "computed" {
-		add("strategy.vwap_source must be exchange or computed")
-	}
-	if s.CandleInterval <= 0 || (24*time.Hour)%s.CandleInterval != 0 {
-		add("strategy.candle_interval must divide a day evenly")
-	}
-	if c.Risk.Capital <= 0 || c.Risk.RiskPerTradePct <= 0 || c.Risk.MaxOpenPositions < 1 || c.Risk.MISLeverage < 1 {
-		add("risk: capital, risk_per_trade_pct, max_open_positions, mis_leverage must be positive")
-	}
-	if c.Radar.Mode != "strict" && c.Radar.Mode != "permissive" && c.Radar.Mode != "off" {
-		add("radar.mode must be strict, permissive or off")
-	}
 	for _, h := range c.Holidays {
 		if _, err := time.Parse("2006-01-02", h); err != nil {
 			add("holiday %q is not YYYY-MM-DD", h)
 		}
 	}
-	for name, v := range map[string]string{
-		"prepare_at": c.Session.PrepareAt, "market_open": c.Session.MarketOpen,
-		"trading_start": c.Session.TradingStart, "entry_cutoff": c.Session.EntryCutoff,
-		"square_off": c.Session.SquareOff, "safety_sweep": c.Session.SafetySweep,
-		"session_end": c.Session.SessionEnd,
-	} {
+	for name, v := range map[string]string{"prepare_at": c.Session.PrepareAt, "morning_run": c.Session.MorningRun,
+		"market_open": c.Session.MarketOpen, "market_close": c.Session.MarketEnd, "evening_run": c.Session.EveningRun} {
 		if _, err := time.Parse("15:04:05", v); err != nil {
 			add("session.%s %q is not HH:MM:SS", name, v)
 		}
@@ -334,8 +256,7 @@ func (c Config) Validate() error {
 //go:embed default.yaml
 var defaultYAML []byte
 
-// WriteDefault writes the annotated default configuration (paper mode) to
-// path if no file exists there. It returns true when a file was created.
+// WriteDefault writes the annotated default config if path does not exist.
 func WriteDefault(path string) (bool, error) {
 	if _, err := os.Stat(path); err == nil {
 		return false, nil
@@ -347,3 +268,6 @@ func WriteDefault(path string) (bool, error) {
 	}
 	return true, os.WriteFile(path, defaultYAML, 0o644)
 }
+
+// DefaultYAML exposes the embedded template (for config.example.yaml sync tests).
+func DefaultYAML() []byte { return defaultYAML }

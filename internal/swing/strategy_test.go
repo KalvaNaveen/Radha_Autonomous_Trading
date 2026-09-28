@@ -1,0 +1,126 @@
+package swing
+
+import (
+	"math"
+	"testing"
+	"time"
+
+	"github.com/nkalva/kitealgo/internal/config"
+	"github.com/nkalva/kitealgo/pkg/models"
+)
+
+func cfg() config.Config { return config.Defaults() }
+
+// bars builds daily bars from closes with a 1% range and constant volume.
+func bars(closes []float64, vol float64) []models.Bar {
+	d := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	out := make([]models.Bar, len(closes))
+	for i, c := range closes {
+		o := c
+		if i > 0 {
+			o = closes[i-1]
+		}
+		out[i] = models.Bar{Date: d.AddDate(0, 0, i), Open: o, High: math.Max(o, c) * 1.005, Low: math.Min(o, c) * 0.995, Close: c, Volume: vol}
+	}
+	return out
+}
+
+func uptrend(n int, start, step float64) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		out[i] = start + step*float64(i)
+	}
+	return out
+}
+
+func TestBreakoutSignal(t *testing.T) {
+	c := cfg()
+	st := NewStrategy(c.Strategy, c.Costs)
+	cl := uptrend(120, 500, 1) // steady uptrend
+	b := bars(cl, 1e6)
+	last := len(b) - 1
+	b[last].Close = b[last-1].Close * 1.03 // jump above the 20-day high
+	b[last].High = b[last].Close * 1.002
+	b[last].Volume = 2e6 // 2× average
+	s := NewSeries(b, c.Strategy)
+	sig, ok, why := st.Evaluate("X", 1, s, last, nil, 0)
+	if !ok || sig.Setup != models.SetupBreakout {
+		t.Fatalf("expected breakout, got ok=%v %s", ok, why)
+	}
+	stopPct := (sig.Close - sig.Stop) / sig.Close * 100
+	if stopPct < c.Strategy.MinStopPct-1e-9 || stopPct > c.Strategy.MaxStopPct+1e-9 {
+		t.Fatalf("stop %.2f%% outside clamp", stopPct)
+	}
+}
+
+func TestNoSignalInDowntrend(t *testing.T) {
+	c := cfg()
+	st := NewStrategy(c.Strategy, c.Costs)
+	b := bars(uptrend(120, 700, -1), 1e6)
+	s := NewSeries(b, c.Strategy)
+	if _, ok, _ := st.Evaluate("X", 1, s, len(b)-1, nil, 0); ok {
+		t.Fatal("no longs in a downtrend")
+	}
+}
+
+func TestLiquidityFilter(t *testing.T) {
+	c := cfg()
+	st := NewStrategy(c.Strategy, c.Costs)
+	b := bars(uptrend(120, 500, 1), 1000) // ₹6 lakh/day turnover
+	s := NewSeries(b, c.Strategy)
+	if _, ok, why := st.Evaluate("X", 1, s, len(b)-1, nil, 0); ok {
+		t.Fatalf("illiquid stock must be rejected (%s)", why)
+	}
+}
+
+func TestManageRatchet(t *testing.T) {
+	c := cfg()
+	st := NewStrategy(c.Strategy, c.Costs)
+	b := bars(uptrend(120, 500, 1), 1e6)
+	s := NewSeries(b, c.Strategy)
+	pos := &models.Position{EntryPrice: 100, InitialStop: 95, Stop: 95, Stage: models.StageInitial, HighestClose: 100, Quantity: 10}
+	// Fake bars: reuse the series structure but control close/ATR.
+	s.Bars[100].Close, s.ATR[100], s.EMAFast[100] = 105.5, 3, 100 // +1.1R
+	if r := st.Manage(pos, s, 100); r != "" || pos.Stage != models.StageBreakeven || pos.Stop <= 100 {
+		t.Fatalf("breakeven: %+v %s", pos, r)
+	}
+	s.Bars[101].Close, s.ATR[101], s.EMAFast[101] = 110.5, 1, 104 // +2.1R → lock at +1R, trail 110.5-3=107.5
+	st.Manage(pos, s, 101)
+	if pos.Stop != 107.5 || pos.Stage != models.StageTrailing {
+		t.Fatalf("lock/trail: stop %.2f stage %s", pos.Stop, pos.Stage)
+	}
+	s.Bars[102].Close, s.ATR[102], s.EMAFast[102] = 108, 1, 108.5 // close below EMA20 → exit
+	if r := st.Manage(pos, s, 102); r == "" {
+		t.Fatal("close below EMA20 after breakeven must exit")
+	}
+	if pos.Stop != 107.5 {
+		t.Fatal("stop must never move down")
+	}
+}
+
+func TestSizing(t *testing.T) {
+	c := cfg()
+	k := Costs{C: c.Costs}
+	// ₹1L equity, 1% risk = ₹1,000; stop ₹20 away → 50; cap 20% = ₹20,000/₹500 = 40 → 40.
+	if q := Size(100000, 100000, 500, 480, c.Risk, k); q != 40 {
+		t.Fatalf("want 40 (cap), got %d", q)
+	}
+	// Wider stop: ₹1,000 / ₹50 = 20 → 20.
+	if q := Size(100000, 100000, 500, 450, c.Risk, k); q != 20 {
+		t.Fatalf("want 20 (risk), got %d", q)
+	}
+	// Cash-limited.
+	if q := Size(100000, 5000, 500, 480, c.Risk, k); q != 9 {
+		t.Fatalf("want 9 (cash), got %d", q)
+	}
+}
+
+func TestDeliveryCosts(t *testing.T) {
+	k := Costs{C: cfg().Costs}
+	buy := k.Buy(50000)
+	sell := k.Sell(50000)
+	// STT 50 + stamp 7.5 + exch 1.535 + SEBI 0.05 + GST ~0.29 ≈ 59.37 ; sell ≈ 51.87 + 15.34
+	if math.Abs(buy-59.37) > 0.05 || math.Abs(sell-67.21) > 0.05 {
+		t.Fatalf("costs buy %.2f sell %.2f", buy, sell)
+	}
+}
