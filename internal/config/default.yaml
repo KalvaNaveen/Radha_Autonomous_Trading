@@ -36,6 +36,7 @@ strategy:             # daily candles
   supertrend_period: 10          # …while Supertrend(10, 3) is green (TradingView's default)
   supertrend_mult: 3
   cross_trend_filter: false      # true: also require close > rising EMA50 (5-yr study: worse in 2024–26)
+  cross_source: close            # close | ha — EMA cross and Supertrend on real or Heikin-Ashi candles (ha: mixed by half)
   regime_mode: strict            # strict: NIFTY > 20 EMA > 50 EMA and the 50 EMA rising (5-yr study: +28% vs +15% for basic)
   ema_fast: 20                   # used by breakout/pullback and the trend filter
   ema_slow: 50
@@ -73,8 +74,8 @@ strategy:             # daily candles
   max_hold_bars: 0               # time stop in days (0 = off)
   time_stop_min_r: 1.0           # …if the trade never reached +1R
   # Heikin-Ashi filters — smoothed candles used for signals only (orders and stops use real prices).
-  ha_entry: off                  # off | green (signal day's HA candle green) | strong (green, no lower wick)
-  ha_exit: off                   # off | red (N red HA candles in a row) | strong_red (red, no upper wick)
+  ha_entry: green                # off | green (signal day's HA candle green) | strong (green, no lower wick)
+  ha_exit: off                   # off | red (N red HA candles in a row) | strong_red — every HA exit cut winners short
   ha_exit_bars: 2                # N for ha_exit: red
   ha_exit_always: false          # true: HA exit also before breakeven
   ha_wick_pct: 10                # a wick up to this % of the HA candle's range counts as "no wick"

@@ -203,6 +203,20 @@ func main() {
 		})
 		add("2.0xATR + BE 1.5R", func(s *config.StrategyConfig) { s.StopATRMult, s.BreakevenAtR = 2, 1.5 })
 	}
+	if *grid == "ha2" {
+		vs = []variant{{"defaults in this build", func(*config.StrategyConfig) {}}}
+		add := func(name string, f func(s *config.StrategyConfig)) { vs = append(vs, variant{name, f}) }
+		add("1 entry: HA candle green", func(s *config.StrategyConfig) { s.HAEntry = "green" })
+		add("1 entry: HA green, no lower wick", func(s *config.StrategyConfig) { s.HAEntry = "strong" })
+		add("2 EMA + Supertrend on HA candles", func(s *config.StrategyConfig) { s.CrossSource = "ha" })
+		add("2 HA EMA/ST + HA green entry", func(s *config.StrategyConfig) { s.CrossSource, s.HAEntry = "ha", "green" })
+		add("3 + exit 2 red HA (after breakeven)", func(s *config.StrategyConfig) { s.HAExit, s.HAExitBars = "red", 2 })
+		add("3 + exit 3 red HA (after breakeven)", func(s *config.StrategyConfig) { s.HAExit, s.HAExitBars = "red", 3 })
+		add("3 + exit strong red HA (after breakeven)", func(s *config.StrategyConfig) { s.HAExit = "strong_red" })
+		add("3 + exit 3 red HA (any time)", func(s *config.StrategyConfig) { s.HAExit, s.HAExitBars, s.HAExitAlways = "red", 3, true })
+		add("1+3 HA green entry + 3 red exit", func(s *config.StrategyConfig) { s.HAEntry, s.HAExit, s.HAExitBars = "green", "red", 3 })
+		add("2+3 HA EMA/ST + 3 red exit", func(s *config.StrategyConfig) { s.CrossSource, s.HAExit, s.HAExitBars = "ha", "red", 3 })
+	}
 	if *grid == "portfolio" {
 		vs = []variant{{"current (1% risk, 5 pos, 20% cap, 2 new/day, regime on)", func(*config.StrategyConfig) {}}}
 		// Risk/market settings live outside StrategyConfig; carry them via closures on cfg copies.

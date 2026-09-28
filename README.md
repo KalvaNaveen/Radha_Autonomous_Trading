@@ -57,7 +57,7 @@ positions stay protected by their GTTs at Zerodha while it's off.
 
 **Market regime** (`regime_mode: strict`): new entries are allowed only while NIFTY 50 closes above its 20-day EMA, the 20-day EMA is above the 50-day EMA, and the 50-day EMA is rising. Open positions are always managed.
 
-**Entry (default `setups: ema_cross`), on the completed daily candle:** EMA10 crosses above EMA20 while Supertrend(10, 3) is green. The entry is taken only on the day the combined condition turns true (whichever of the two happens last), and bought at the next morning run.
+**Entry (default `setups: ema_cross`), on the completed daily candle:** EMA10 crosses above EMA20 while Supertrend(10, 3) is green, and that day's Heikin-Ashi candle is green (`ha_entry: green`). The entry is taken only on the day the EMA/Supertrend condition turns true (whichever of the two happens last), and bought at the next morning run. Heikin-Ashi prices are a signal only; orders, stops and sizing use real prices.
 
 Other setups are still available: `breakout` (close above the prior 20-day high on ≥ 1.5× volume), `pullback`, or `both`.
 
@@ -86,7 +86,10 @@ Also available (all tested, none adopted — see below): `stop_mode: supertrend 
 | Original (breakout + pullback, ratcheting stop) | −15.5% | 27.7% | 0.81 | +7.0% | −25.9% |
 | Breakout + Heikin-Ashi | +2.8% | 14.7% | 1.05 | +13.8% | −6.1% |
 | EMA10/20 cross + Supertrend, fixed 3×ATR stop | +15.0% | 11.7% | 1.37 | +6.9% | +2.3% |
-| **…+ breakeven at +1.5R + strict market filter (current)** | **+28.4%** | **10.6%** | **1.79** | **+12.4%** | **+6.2%** |
+| …+ breakeven at +1.5R + strict market filter | +28.4% | 10.6% | 1.79 | +12.4% | +6.2% |
+| **…+ Heikin-Ashi green entry (current)** | **+31.4%** | **10.6%** | **1.93** | **+12.4%** | **+8.2%** |
+
+**Heikin-Ashi on the EMA strategy** (same study): a green HA candle on the signal day raised the result to +31.4% (2024–26: +8.2% vs +6.2%, 2021–24 unchanged, same drawdown); requiring no lower wick lowered it to +20.3%. Computing the EMA cross and Supertrend on HA candles (`cross_source: ha`) gave +30.7% but was worse in 2024–26. Every HA red-candle exit cut the result to +6–15%.
 
 **Market filter and portfolio** (same study): the strict market filter returned +28.4% (max DD 10.6%, PF 1.79, +12.4% / +6.2% by half) against +14.9% for the basic one, and stayed at +26–28.5% with 5, 6 or 7 positions. Switching the filter off lost 9.4%. More positions (8–10) looked better only in the first half; risk above 1% per trade lowered both return and return/drawdown.
 

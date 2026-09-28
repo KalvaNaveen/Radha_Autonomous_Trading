@@ -50,9 +50,15 @@ func NewSeries(bars []models.Bar, p config.StrategyConfig) *Series {
 	s.PriorHigh = indicators.PriorHighest(h, p.BreakoutLookback)
 	s.HAOpen, s.HAHigh, s.HALow, s.HAClose = indicators.HeikinAshi(o, h, l, s.Close)
 	cf, cs, sp, sm := crossParams(p)
-	s.CrossFast = indicators.EMA(s.Close, cf)
-	s.CrossSlow = indicators.EMA(s.Close, cs)
-	s.STDir, s.STLine = indicators.Supertrend(h, l, s.Close, sp, sm)
+	if p.CrossSource == "ha" { // EMA cross and Supertrend on Heikin-Ashi candles (signals only)
+		s.CrossFast = indicators.EMA(s.HAClose, cf)
+		s.CrossSlow = indicators.EMA(s.HAClose, cs)
+		s.STDir, s.STLine = indicators.Supertrend(s.HAHigh, s.HALow, s.HAClose, sp, sm)
+	} else {
+		s.CrossFast = indicators.EMA(s.Close, cf)
+		s.CrossSlow = indicators.EMA(s.Close, cs)
+		s.STDir, s.STLine = indicators.Supertrend(h, l, s.Close, sp, sm)
+	}
 	return s
 }
 

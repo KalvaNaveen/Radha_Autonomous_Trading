@@ -96,6 +96,7 @@ type StrategyConfig struct {
 	SupertrendPeriod int     `yaml:"supertrend_period"`  // 10
 	SupertrendMult   float64 `yaml:"supertrend_mult"`    // 3
 	CrossTrendFilter bool    `yaml:"cross_trend_filter"` // also require close > rising EMA50
+	CrossSource      string  `yaml:"cross_source"`       // close | ha — compute the EMA cross and Supertrend on real or Heikin-Ashi candles
 	ExitOnEMACross   bool    `yaml:"exit_on_ema_cross"`  // EMA(fast) closes below EMA(slow) → exit next morning
 	StopMode         string  `yaml:"stop_mode"`          // atr (entry − stop_atr_mult × ATR) | supertrend (the green line)
 	FixedStop        bool    `yaml:"fixed_stop"`         // true: no legacy breakeven/lock/trail ratchet (the options below still apply)
@@ -202,10 +203,10 @@ func Defaults() Config {
 			MaxHoldBars: 0, TimeStopMinR: 1.0,
 			MinPrice: 50, MinTurnoverCr: 10, MaxGapUpPct: 2.0, RSLookback: 60, CooldownBars: 5,
 			Setups: "ema_cross", RegimeMode: "strict",
-			CrossFast: 10, CrossSlow: 20, SupertrendPeriod: 10, SupertrendMult: 3,
+			CrossFast: 10, CrossSlow: 20, SupertrendPeriod: 10, SupertrendMult: 3, CrossSource: "close",
 			ExitOnEMACross: true, StopMode: "atr", FixedStop: true,
 			SwingLowBars: 10, BreakevenAtR: 1.5, TrailMode: "off", TrailStartR: 2, TargetR: 0, PartialPct: 100,
-			HAEntry: "off", HAExit: "off", HAExitBars: 2, HAWickPct: 10,
+			HAEntry: "green", HAExit: "off", HAExitBars: 2, HAWickPct: 10,
 		},
 		Risk: RiskConfig{Capital: 100000, RiskPerTradePct: 1.0, MaxPositionPct: 20, MaxPositions: 5,
 			MaxNewPerDay: 2, DrawdownPausePct: 15, DrawdownPauseDays: 20},
@@ -271,6 +272,9 @@ func (c Config) Validate() error {
 	}
 	if s.Setups == "ema_cross" && s.CrossFast > 0 && s.CrossSlow <= s.CrossFast {
 		add("strategy: ema_cross_fast must be below ema_cross_slow")
+	}
+	if !oneOf(s.CrossSource, "", "close", "ha") {
+		add("strategy.cross_source must be close or ha, got %q", s.CrossSource)
 	}
 	if !oneOf(s.StopMode, "", "atr", "supertrend", "swing_low") {
 		add("strategy.stop_mode must be atr, supertrend or swing_low, got %q", s.StopMode)
