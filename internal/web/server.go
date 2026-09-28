@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -43,10 +44,20 @@ func New(eng *engine.Engine, ring *LogRing, log *slog.Logger, version string) *S
 func (s *Server) Handler() http.Handler {
 	authH := s.eng.Auth().Handler()
 	mux := http.NewServeMux()
-	mux.Handle("/login", authH)
-	mux.Handle("/kite/callback", authH)
-	mux.Handle("/healthz", authH)
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /login", authH)
+	mux.Handle("GET /kite/callback", authH)
+	mux.Handle("GET /healthz", authH)
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		// Zerodha redirects to whatever Redirect URL the Kite app has; accept
+		// the login on any path so "http://127.0.0.1:8080" alone also works.
+		if r.URL.Query().Get("request_token") != "" {
+			s.eng.Auth().Callback(w, r)
+			return
+		}
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		b, _ := assets.ReadFile("index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -81,15 +92,28 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // Serve runs until ctx is cancelled.
+// It also listens on the IPv6 loopback when the configured host is
+// 127.0.0.1, because Windows browsers often resolve "localhost" to ::1.
 func (s *Server) Serve(ctx context.Context, listen string) error {
-	srv := &http.Server{Addr: listen, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	errc := make(chan error, 1)
+	h := s.Handler()
+	srv := &http.Server{Addr: listen, Handler: h, ReadHeaderTimeout: 5 * time.Second}
+	errc := make(chan error, 2)
 	go func() { errc <- srv.ListenAndServe() }()
+	var srv6 *http.Server
+	if host, port, err := net.SplitHostPort(listen); err == nil && (host == "127.0.0.1" || host == "localhost") {
+		if ln, err := net.Listen("tcp6", "[::1]:"+port); err == nil {
+			srv6 = &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
+			go func() { _ = srv6.Serve(ln) }()
+		}
+	}
 	select {
 	case <-ctx.Done():
 		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sctx)
+		if srv6 != nil {
+			_ = srv6.Shutdown(sctx)
+		}
 		return nil
 	case err := <-errc:
 		if errors.Is(err, http.ErrServerClosed) {

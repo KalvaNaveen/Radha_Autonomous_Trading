@@ -65,7 +65,11 @@ type Manager struct {
 
 	apiRoot, loginRoot string // dev overrides (simulator)
 	credPath           string
+	onLogin            func()
 }
+
+// SetOnLogin registers a callback fired after a successful login.
+func (m *Manager) SetOnLogin(f func()) { m.mu.Lock(); m.onLogin = f; m.mu.Unlock() }
 
 type credentials struct {
 	APIKey    string `json:"api_key"`
@@ -220,29 +224,7 @@ func (m *Manager) Handler() http.Handler {
 		}
 		http.Redirect(w, r, u, http.StatusFound)
 	})
-	mux.HandleFunc("GET /kite/callback", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		if q.Get("status") != "success" || q.Get("request_token") == "" {
-			http.Redirect(w, r, "/?login_error="+url.QueryEscape("Zerodha login was not completed"), http.StatusFound)
-			return
-		}
-		c := kiteconnect.New(m.APIKey())
-		if m.apiRoot != "" {
-			c.SetBaseURI(m.apiRoot)
-		}
-		if m.httpc != nil {
-			c.SetHTTPClient(m.httpc)
-		}
-		sess, err := c.GenerateSession(q.Get("request_token"), m.secret())
-		if err != nil {
-			m.log.Error("generate session failed — check the API secret", "err", err)
-			http.Redirect(w, r, "/?login_error="+url.QueryEscape("Session exchange failed (usually a wrong API secret): "+err.Error()), http.StatusFound)
-			return
-		}
-		m.store(Token{AccessToken: sess.AccessToken, UserID: sess.UserID, CreatedAt: m.clk.Now()})
-		m.log.Info("Kite session established", "user", sess.UserID)
-		http.Redirect(w, r, "/?login=ok", http.StatusFound)
-	})
+	mux.HandleFunc("GET /kite/callback", m.Callback)
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.RLock()
 		f := m.statusFn
@@ -259,6 +241,41 @@ func (m *Manager) Handler() http.Handler {
 		fmt.Fprintf(w, "ok token_valid=%v\n", ok)
 	})
 	return mux
+}
+
+// Callback completes the Zerodha login: it exchanges the request_token for
+// today's access token. It is mounted at /kite/callback and is also invoked
+// for any other path that receives a request_token (so a Redirect URL of
+// just http://127.0.0.1:8080 works too).
+func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	m.log.Info("login redirect received from Zerodha", "path", r.URL.Path, "status", q.Get("status"), "has_request_token", q.Get("request_token") != "")
+	if q.Get("status") != "success" || q.Get("request_token") == "" {
+		http.Redirect(w, r, "/?login_error="+url.QueryEscape("Zerodha login was not completed"), http.StatusFound)
+		return
+	}
+	c := kiteconnect.New(m.APIKey())
+	if m.apiRoot != "" {
+		c.SetBaseURI(m.apiRoot)
+	}
+	if m.httpc != nil {
+		c.SetHTTPClient(m.httpc)
+	}
+	sess, err := c.GenerateSession(q.Get("request_token"), m.secret())
+	if err != nil {
+		m.log.Error("generate session failed — check the API secret", "err", err)
+		http.Redirect(w, r, "/?login_error="+url.QueryEscape("Session exchange failed (usually a wrong API secret): "+err.Error()), http.StatusFound)
+		return
+	}
+	m.store(Token{AccessToken: sess.AccessToken, UserID: sess.UserID, CreatedAt: m.clk.Now()})
+	m.log.Info("Kite session established", "user", sess.UserID)
+	m.mu.RLock()
+	hook := m.onLogin
+	m.mu.RUnlock()
+	if hook != nil {
+		hook()
+	}
+	http.Redirect(w, r, "/?login=ok", http.StatusFound)
 }
 
 // Serve runs the HTTP server until ctx is cancelled.

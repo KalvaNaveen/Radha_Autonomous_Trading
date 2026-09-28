@@ -63,3 +63,21 @@ func TestUniverseSave(t *testing.T) {
 		t.Fatalf("save: %d %s", c, b)
 	}
 }
+
+// Zerodha redirects to the app's Redirect URL; a login landing on "/" (or any
+// path) with a request_token must be handled, not silently dropped.
+func TestLoginRedirectOnAnyPath(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for _, p := range []string{"/?status=success&request_token=abc", "/whatever?status=success&request_token=abc", "/kite/callback?status=cancelled"} {
+		res, err := c.Get(ts.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loc := res.Header.Get("Location")
+		if res.StatusCode != http.StatusFound || !strings.Contains(loc, "login_error") {
+			t.Fatalf("%s: want redirect to the panel with an error (no real Kite here), got %d %q", p, res.StatusCode, loc)
+		}
+	}
+}

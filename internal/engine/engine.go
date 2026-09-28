@@ -85,6 +85,7 @@ func New(cfg config.Config, log *slog.Logger) (*Engine, error) {
 	e := &Engine{cfg: cfg, log: log, clk: clk, sess: sess, auth: am, httpc: httpc, store: st,
 		journal: swing.NewJournal(cfg.Paths.JournalDir), strat: swing.NewStrategy(cfg.Strategy, cfg.Costs),
 		data: data.NewStore(cfg.Paths.DataDir, nil, log), retry: make(chan struct{}, 1), stage: "starting", stageAt: clk.Now()}
+	am.SetOnLogin(e.Retry) // wake an aborted/sleeping day as soon as you log in
 	if cfg.Mode == "paper" {
 		e.paper = broker.NewPaper(0, clk.Now)
 		e.paper.SlippagePct = cfg.Costs.SlippagePct
@@ -254,7 +255,9 @@ type dayCtx struct {
 func (e *Engine) runDay(parent context.Context, today time.Time) error {
 	// 1. Login.
 	e.setStage("waiting_login", "Log in to Kite to start today's run (tokens expire daily at 06:00).")
-	loginCtx, cancel := context.WithDeadline(parent, e.sess.At(today, e.sess.EveningRun).Add(2*time.Hour))
+	// Wait for a login until shortly before the next session prepares: a
+	// login late in the evening still runs today's evening scan.
+	loginCtx, cancel := context.WithDeadline(parent, e.sess.At(e.sess.NextTradingDay(today), e.sess.PrepareAt).Add(-time.Minute))
 	defer cancel()
 	var kite *broker.Kite
 	for {
