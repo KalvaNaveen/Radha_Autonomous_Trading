@@ -31,7 +31,7 @@ func main() {
 	cfgPath := flag.String("config", "", "config file (default: built-in defaults)")
 	years := flag.Int("years", 5, "years")
 	grid := flag.String("grid", "ha", "ha: Heikin-Ashi variants · entry: entry-side variants on top of the HA exit")
-	detail := flag.Bool("detail", false, "print a trade breakdown for the baseline and the best HA variant")
+	detail := flag.String("detail", "", "print a trade breakdown for the variant with this exact name")
 	flag.Parse()
 
 	cfg := config.Defaults()
@@ -122,8 +122,31 @@ func main() {
 			}
 		}
 	}
-	fmt.Printf("%-44s | %8s %6s %5s %5s %6s %6s | %7s %5s | %7s %5s\n", "variant", "return%", "maxDD%", "PF", "trd", "win%", "avgW/L", "H1 ret%", "H1 PF", "H2 ret%", "H2 PF")
-	fmt.Println(strings.Repeat("-", 124))
+	if *grid == "cross" {
+		vs = []variant{{"defaults in this build", func(*config.StrategyConfig) {}}}
+		for _, tf := range []bool{false, true} {
+			for _, sm := range []string{"atr", "supertrend"} {
+				for _, rat := range []bool{false, true} {
+					for _, ts := range []bool{false, true} {
+						tf, sm, rat, ts := tf, sm, rat, ts
+						name := fmt.Sprintf("cross · trend50 %s · stop %s · ratchet %s · time %s", onoff(tf), sm, onoff(rat), onoff(ts))
+						vs = append(vs, variant{name, func(s *config.StrategyConfig) {
+							s.Setups, s.ExitOnEMACross, s.CrossTrendFilter, s.StopMode = "ema_cross", true, tf, sm
+							s.HAEntry, s.HAExit, s.ExitBelowEMAFast = "off", "off", false
+							if !rat {
+								s.BreakevenR, s.LockR = 1e6, 2e6 // stop stays at the initial level
+							}
+							if !ts {
+								s.MaxHoldBars = 0
+							}
+						}})
+					}
+				}
+			}
+		}
+	}
+	fmt.Printf("%-62s | %8s %6s %5s %5s %6s %6s | %7s %5s | %7s %5s\n", "variant", "return%", "maxDD%", "PF", "trd", "win%", "avgW/L", "H1 ret%", "H1 PF", "H2 ret%", "H2 PF")
+	fmt.Println(strings.Repeat("-", 142))
 	for _, v := range vs {
 		c := cfg
 		v.set(&c.Strategy)
@@ -133,14 +156,14 @@ func main() {
 		f := run(in, c, from, to)
 		h1 := run(in, c, from, mid)
 		h2 := run(in, c, mid, to)
-		fmt.Printf("%-44s | %8.1f %6.1f %5.2f %5d %6.1f %6.2f | %7.1f %5.2f | %7.1f %5.2f\n", v.name,
+		fmt.Printf("%-62s | %8.1f %6.1f %5.2f %5d %6.1f %6.2f | %7.1f %5.2f | %7.1f %5.2f\n", v.name,
 			f.TotalReturnPct, f.MaxDrawdownPct, f.ProfitFactor, f.Trades, f.WinRatePct, ratio(f), h1.TotalReturnPct, h1.ProfitFactor, h2.TotalReturnPct, h2.ProfitFactor)
 	}
 	b := run(in, cfg, from, to)
 	fmt.Printf("\nNIFTY buy-and-hold over the full window: %.1f%%\n", b.BenchmarkReturnPc)
-	if *detail {
+	if *detail != "" {
 		for _, v := range vs {
-			if v.name == "baseline (current rules)" || v.name == "entry green · exit red2 +ema" {
+			if v.name == *detail {
 				c := cfg
 				v.set(&c.Strategy)
 				for _, w := range [][2]time.Time{{from, mid}, {mid, to}} {
@@ -201,6 +224,13 @@ func breakdown(title string, r backtest.Result) {
 		fmt.Printf("  %-44s n=%3d win%%=%5.1f net ₹%8.0f avgR %5.2f\n", k, a.n, float64(a.w)/float64(a.n)*100, a.net, a.r/float64(a.n))
 	}
 	fmt.Printf("  skipped: %v\n", r.Skipped)
+}
+
+func onoff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 func ratio(s backtest.Summary) float64 {

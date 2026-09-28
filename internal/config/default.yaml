@@ -29,37 +29,48 @@ session:              # IST
   evening_run: "15:50:00"   # today's daily candle is final: move stops, scan for tomorrow
 
 strategy:             # daily candles
-  ema_fast: 20
+  # ── Entry ────────────────────────────────────────────────────────────────
+  setups: ema_cross              # ema_cross | breakout | pullback | both (= breakout + pullback)
+  ema_cross_fast: 10             # ema_cross: EMA10 crosses above EMA20…
+  ema_cross_slow: 20
+  supertrend_period: 10          # …while Supertrend(10, 3) is green (TradingView's default)
+  supertrend_mult: 3
+  cross_trend_filter: false      # true: also require close > rising EMA50 (5-yr study: worse in 2024–26)
+  regime_mode: basic             # basic: NIFTY > rising 50 EMA · strict: also NIFTY > 20 EMA > 50 EMA
+  ema_fast: 20                   # used by breakout/pullback and the trend filter
   ema_slow: 50
   atr_period: 14
   volume_avg_period: 20
-  breakout_lookback: 20          # close above the prior 20-day high…
+  breakout_lookback: 20          # breakout: close above the prior 20-day high…
   breakout_volume_ratio: 1.5     # …on 1.5× average volume
-  pullback_lookback: 3           # low touched the 20 EMA within the last 3 days…
+  pullback_lookback: 3           # pullback: low touched the 20 EMA within the last 3 days…
   pullback_tolerance_pct: 1.0
   pullback_volume_ratio: 1.0     # …then closed above yesterday's high on ≥ average volume
   slope_lookback: 5              # the 50 EMA must be rising
-  stop_atr_mult: 3.0             # initial stop = entry − 3 × ATR…
-  min_stop_pct: 3                # …clamped to 3%–8% below entry
-  max_stop_pct: 8
-  breakeven_r: 1.0               # at +1R: stop → entry + costs
-  lock_r: 2.0                    # at +2R: stop → entry + 1R
-  trail_atr_mult: 3.0            # after breakeven: stop ≥ highest close − 3 × ATR
-  exit_below_ema_fast: true      # after breakeven, a close below the 20 EMA exits next morning
-  max_hold_bars: 40              # time stop: exit after 40 days…
-  time_stop_min_r: 1.0           # …if the trade never reached +1R
   min_price: 50
   min_turnover_cr: 10            # average daily turnover ≥ ₹10 crore (liquidity)
   max_gap_up_pct: 2.0            # skip an entry that opens > 2% above the signal close
   rs_lookback: 60                # rank candidates by 60-day return vs the index
   cooldown_bars: 5               # days to wait before re-entering a stock after an exit
-  setups: breakout               # breakout | pullback | both (5-yr study: pullbacks were break-even at best)
-  regime_mode: basic             # basic: NIFTY > rising 50 EMA · strict: also NIFTY > 20 EMA > 50 EMA
+  # ── Protective stop (a GTT at Zerodha, works even if this PC is off) ─────
+  stop_mode: atr                 # atr: entry − stop_atr_mult × ATR · supertrend: the green Supertrend line
+  stop_atr_mult: 3.0
+  min_stop_pct: 3                # stop kept 3%–8% below entry
+  max_stop_pct: 8
+  fixed_stop: true               # true: the stop never moves; exits come from the EMA cross
+  breakeven_r: 1.0               # fixed_stop false: at +1R stop → entry + costs…
+  lock_r: 2.0                    # …at +2R → entry + 1R…
+  trail_atr_mult: 3.0            # …then highest close − 3 × ATR
+  # ── Exits ────────────────────────────────────────────────────────────────
+  exit_on_ema_cross: true        # EMA10 closes below EMA20 → sell at the next morning run
+  exit_below_ema_fast: false     # close below EMA20 after breakeven → sell
+  max_hold_bars: 0               # time stop in days (0 = off)
+  time_stop_min_r: 1.0           # …if the trade never reached +1R
   # Heikin-Ashi filters — smoothed candles used for signals only (orders and stops use real prices).
-  ha_entry: green                # off | green (signal day's HA candle green) | strong (green, no lower wick)
-  ha_exit: red                   # off | red (N red HA candles in a row) | strong_red (red, no upper wick)
+  ha_entry: off                  # off | green (signal day's HA candle green) | strong (green, no lower wick)
+  ha_exit: off                   # off | red (N red HA candles in a row) | strong_red (red, no upper wick)
   ha_exit_bars: 2                # N for ha_exit: red
-  ha_exit_always: false          # true: HA exit also before breakeven; false: only once the stop is at breakeven
+  ha_exit_always: false          # true: HA exit also before breakeven
   ha_wick_pct: 10                # a wick up to this % of the HA candle's range counts as "no wick"
 
 risk:

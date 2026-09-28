@@ -57,3 +57,27 @@ func TestHeikinAshi(t *testing.T) {
 		t.Fatalf("ha %v %v %v %v", hO, hH, hL, hC)
 	}
 }
+
+func TestSupertrendFlips(t *testing.T) {
+	var h, l, c []float64
+	for i := 0; i < 40; i++ { // rising
+		x := 100 + float64(i)
+		h, l, c = append(h, x+1), append(l, x-1), append(c, x)
+	}
+	for i := 0; i < 40; i++ { // falling hard
+		x := 140 - 3*float64(i)
+		h, l, c = append(h, x+1), append(l, x-1), append(c, x)
+	}
+	dir, line := Supertrend(h, l, c, 10, 3)
+	if dir[35] != 1 || line[35] >= c[35] {
+		t.Fatalf("uptrend: dir %d line %.2f close %.2f", dir[35], line[35], c[35])
+	}
+	if dir[79] != -1 || line[79] <= c[79] {
+		t.Fatalf("downtrend: dir %d line %.2f close %.2f", dir[79], line[79], c[79])
+	}
+	for i := 11; i < 40; i++ { // the green line never falls in an uptrend
+		if dir[i] == 1 && dir[i-1] == 1 && line[i] < line[i-1]-1e-9 {
+			t.Fatalf("green line fell at %d", i)
+		}
+	}
+}

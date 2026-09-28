@@ -88,8 +88,18 @@ type StrategyConfig struct {
 	RSLookback       int     `yaml:"rs_lookback"`     // relative-strength window, bars
 	CooldownBars     int     `yaml:"cooldown_bars"`   // wait after an exit before re-entering the symbol
 
-	Setups     string `yaml:"setups"`      // both | breakout | pullback
-	RegimeMode string `yaml:"regime_mode"` // basic: index > rising EMA50 · strict: also index > EMA20 > EMA50
+	Setups string `yaml:"setups"` // ema_cross | breakout | pullback | both (= breakout + pullback)
+
+	// ema_cross setup: EMA(fast) crosses above EMA(slow) while Supertrend is green.
+	CrossFast        int     `yaml:"ema_cross_fast"`     // 10
+	CrossSlow        int     `yaml:"ema_cross_slow"`     // 20
+	SupertrendPeriod int     `yaml:"supertrend_period"`  // 10
+	SupertrendMult   float64 `yaml:"supertrend_mult"`    // 3
+	CrossTrendFilter bool    `yaml:"cross_trend_filter"` // also require close > rising EMA50
+	ExitOnEMACross   bool    `yaml:"exit_on_ema_cross"`  // EMA(fast) closes below EMA(slow) → exit next morning
+	StopMode         string  `yaml:"stop_mode"`          // atr (entry − stop_atr_mult × ATR) | supertrend (the green line)
+	FixedStop        bool    `yaml:"fixed_stop"`         // true: the initial stop never moves (no breakeven/lock/trailing)
+	RegimeMode       string  `yaml:"regime_mode"`        // basic: index > rising EMA50 · strict: also index > EMA20 > EMA50
 
 	// Heikin-Ashi filters (signals only — orders, stops and sizing use real prices).
 	HAEntry      string  `yaml:"ha_entry"`       // off | green | strong (green with no lower wick)
@@ -182,11 +192,13 @@ func Defaults() Config {
 			BreakoutLookback: 20, BreakoutVolRatio: 1.5,
 			PullbackLookback: 3, PullbackTolPct: 1.0, PullbackVolRatio: 1.0, SlopeLookback: 5,
 			StopATRMult: 3.0, MinStopPct: 3, MaxStopPct: 8,
-			BreakevenR: 1.0, LockR: 2.0, TrailATRMult: 3.0, ExitBelowEMAFast: true,
-			MaxHoldBars: 40, TimeStopMinR: 1.0,
+			BreakevenR: 1.0, LockR: 2.0, TrailATRMult: 3.0, ExitBelowEMAFast: false,
+			MaxHoldBars: 0, TimeStopMinR: 1.0,
 			MinPrice: 50, MinTurnoverCr: 10, MaxGapUpPct: 2.0, RSLookback: 60, CooldownBars: 5,
-			Setups: "breakout", RegimeMode: "basic",
-			HAEntry: "green", HAExit: "red", HAExitBars: 2, HAWickPct: 10,
+			Setups: "ema_cross", RegimeMode: "basic",
+			CrossFast: 10, CrossSlow: 20, SupertrendPeriod: 10, SupertrendMult: 3,
+			ExitOnEMACross: true, StopMode: "atr", FixedStop: true,
+			HAEntry: "off", HAExit: "off", HAExitBars: 2, HAWickPct: 10,
 		},
 		Risk: RiskConfig{Capital: 100000, RiskPerTradePct: 1.0, MaxPositionPct: 20, MaxPositions: 5,
 			MaxNewPerDay: 2, DrawdownPausePct: 15, DrawdownPauseDays: 20},
@@ -247,8 +259,14 @@ func (c Config) Validate() error {
 	if s.BreakevenR <= 0 || s.LockR <= s.BreakevenR {
 		add("strategy: need 0 < breakeven_r < lock_r")
 	}
-	if !oneOf(s.Setups, "", "both", "breakout", "pullback") {
-		add("strategy.setups must be both, breakout or pullback, got %q", s.Setups)
+	if !oneOf(s.Setups, "", "both", "breakout", "pullback", "ema_cross") {
+		add("strategy.setups must be ema_cross, breakout, pullback or both, got %q", s.Setups)
+	}
+	if s.Setups == "ema_cross" && s.CrossFast > 0 && s.CrossSlow <= s.CrossFast {
+		add("strategy: ema_cross_fast must be below ema_cross_slow")
+	}
+	if !oneOf(s.StopMode, "", "atr", "supertrend") {
+		add("strategy.stop_mode must be atr or supertrend, got %q", s.StopMode)
 	}
 	if !oneOf(s.RegimeMode, "", "basic", "strict") {
 		add("strategy.regime_mode must be basic or strict, got %q", s.RegimeMode)

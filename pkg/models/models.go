@@ -232,6 +232,7 @@ type SetupKind string
 const (
 	SetupPullback SetupKind = "PULLBACK"
 	SetupBreakout SetupKind = "BREAKOUT"
+	SetupEMACross SetupKind = "EMA_CROSS" // EMA fast crosses above EMA slow with Supertrend green
 )
 
 // StopStage tracks how far the stop has been ratcheted.

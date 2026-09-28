@@ -27,6 +27,10 @@ type Series struct {
 	HAHigh    []float64
 	HALow     []float64
 	HAClose   []float64
+	CrossFast []float64 // EMA(ema_cross_fast), e.g. EMA10
+	CrossSlow []float64 // EMA(ema_cross_slow), e.g. EMA20
+	STDir     []int8    // Supertrend direction: +1 green, −1 red
+	STLine    []float64 // Supertrend line
 	byDate    map[string]int
 }
 
@@ -45,7 +49,35 @@ func NewSeries(bars []models.Bar, p config.StrategyConfig) *Series {
 	s.VolAvg = indicators.SMA(v, p.VolumeAvgPeriod)
 	s.PriorHigh = indicators.PriorHighest(h, p.BreakoutLookback)
 	s.HAOpen, s.HAHigh, s.HALow, s.HAClose = indicators.HeikinAshi(o, h, l, s.Close)
+	cf, cs, sp, sm := crossParams(p)
+	s.CrossFast = indicators.EMA(s.Close, cf)
+	s.CrossSlow = indicators.EMA(s.Close, cs)
+	s.STDir, s.STLine = indicators.Supertrend(h, l, s.Close, sp, sm)
 	return s
+}
+
+// crossParams returns the ema_cross settings (defaults for an older config).
+func crossParams(p config.StrategyConfig) (fast, slow, stPeriod int, stMult float64) {
+	fast, slow, stPeriod, stMult = p.CrossFast, p.CrossSlow, p.SupertrendPeriod, p.SupertrendMult
+	if fast <= 0 {
+		fast = 10
+	}
+	if slow <= fast {
+		slow = 20
+	}
+	if stPeriod <= 0 {
+		stPeriod = 10
+	}
+	if stMult <= 0 {
+		stMult = 3
+	}
+	return
+}
+
+// crossUp reports whether the ema_cross condition holds at bar i:
+// EMA(fast) above EMA(slow) and Supertrend green.
+func (s *Series) crossUp(i int) bool {
+	return s.CrossFast[i] > s.CrossSlow[i] && s.STDir[i] == 1
 }
 
 // HAGreen reports whether Heikin-Ashi candle i closed above its open.
@@ -92,7 +124,8 @@ func NewStrategy(p config.StrategyConfig, c config.CostsConfig) *Strategy {
 func (st *Strategy) Warmup() int {
 	p := st.P
 	w := p.EMASlow + p.SlopeLookback
-	for _, x := range []int{p.BreakoutLookback + 1, p.ATRPeriod + 1, p.VolumeAvgPeriod + 1, p.RSLookback + 1} {
+	_, cs, sp, _ := crossParams(p)
+	for _, x := range []int{p.BreakoutLookback + 1, p.ATRPeriod + 1, p.VolumeAvgPeriod + 1, p.RSLookback + 1, cs + 1, sp + 2} {
 		if x > w {
 			w = x
 		}
@@ -150,7 +183,7 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 		return models.Signal{}, false, fmt.Sprintf("price %.2f < %.0f", c, p.MinPrice)
 	case c*s.VolAvg[i] < p.MinTurnoverCr*1e7:
 		return models.Signal{}, false, fmt.Sprintf("turnover ₹%.1f cr < ₹%.0f cr", c*s.VolAvg[i]/1e7, p.MinTurnoverCr)
-	case !(c > es && ef > es && es > s.EMASlow[i-p.SlopeLookback]):
+	case (p.Setups != "ema_cross" || p.CrossTrendFilter) && !(c > es && ef > es && es > s.EMASlow[i-p.SlopeLookback]):
 		return models.Signal{}, false, "not in an uptrend (needs close and EMA20 above a rising EMA50)"
 	case atr <= 0:
 		return models.Signal{}, false, "ATR unavailable"
@@ -158,8 +191,18 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 	prevVolAvg := s.VolAvg[i-1]
 	var kind models.SetupKind
 	var why string
-	allowBO, allowPB := p.Setups != "pullback", p.Setups != "breakout"
-	if allowBO && c > s.PriorHigh[i] && b.Volume >= p.BreakoutVolRatio*prevVolAvg {
+	allowBO, allowPB := p.Setups != "pullback" && p.Setups != "ema_cross", p.Setups != "breakout" && p.Setups != "ema_cross"
+	if p.Setups == "ema_cross" {
+		cf, cs, _, _ := crossParams(p)
+		if s.crossUp(i) && !s.crossUp(i-1) {
+			kind = models.SetupEMACross
+			why = fmt.Sprintf("EMA%d %.2f crossed above EMA%d %.2f with Supertrend green (line %.2f)", cf, s.CrossFast[i], cs, s.CrossSlow[i], s.STLine[i])
+		} else if s.crossUp(i) {
+			return models.Signal{}, false, "EMA cross and Supertrend already bullish — entry only on the day it turns"
+		} else {
+			return models.Signal{}, false, fmt.Sprintf("no entry: needs EMA%d above EMA%d and Supertrend green", cf, cs)
+		}
+	} else if allowBO && c > s.PriorHigh[i] && b.Volume >= p.BreakoutVolRatio*prevVolAvg {
 		kind = models.SetupBreakout
 		why = fmt.Sprintf("close %.2f > %d-day high %.2f on %.1f× volume", c, p.BreakoutLookback, s.PriorHigh[i], b.Volume/prevVolAvg)
 	} else if allowPB {
@@ -189,6 +232,9 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 		why += "; Heikin-Ashi confirms"
 	}
 	stop := st.InitialStop(c, atr)
+	if p.StopMode == "supertrend" && s.STDir[i] == 1 && s.STLine[i] > 0 && s.STLine[i] < c {
+		stop = st.clampStop(c, s.STLine[i])
+	}
 	rs := st.RelativeStrength(s, i, idx, j)
 	return models.Signal{InstrumentToken: token, Symbol: sym, Date: b.Date, Setup: kind, Close: c, Stop: stop,
 		ATR: atr, RS: rs, Score: rs, Reason: why}, true, why
@@ -197,6 +243,14 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 // InitialStop is entry − stop_atr_mult × ATR, clamped to [min_stop_pct, max_stop_pct].
 func (st *Strategy) InitialStop(entry, atr float64) float64 {
 	d := st.P.StopATRMult * atr
+	d = math.Max(d, entry*indicators.Pct(st.P.MinStopPct))
+	d = math.Min(d, entry*indicators.Pct(st.P.MaxStopPct))
+	return entry - d
+}
+
+// clampStop keeps a stop between min_stop_pct and max_stop_pct below entry.
+func (st *Strategy) clampStop(entry, stop float64) float64 {
+	d := entry - stop
 	d = math.Max(d, entry*indicators.Pct(st.P.MinStopPct))
 	d = math.Min(d, entry*indicators.Pct(st.P.MaxStopPct))
 	return entry - d
@@ -233,13 +287,16 @@ func (st *Strategy) Manage(pos *models.Position, s *Series, i int) string {
 		}
 	}
 	gain := c - pos.EntryPrice
+	if p.FixedStop {
+		gain = -1 // the initial stop is the only stop: skip breakeven, lock and trailing
+	}
 	if gain >= p.BreakevenR*R {
 		raise(pos.EntryPrice*(1+st.Costs.RoundTripFrac()), models.StageBreakeven)
 	}
 	if gain >= p.LockR*R {
 		raise(pos.EntryPrice+R, models.StageLocked)
 	}
-	if pos.Stage != models.StageInitial && s.ATR[i] > 0 {
+	if !p.FixedStop && pos.Stage != models.StageInitial && s.ATR[i] > 0 {
 		if trail := pos.HighestClose - p.TrailATRMult*s.ATR[i]; trail > pos.Stop+1e-9 {
 			pos.Stop = trail
 			pos.Stage = models.StageTrailing
@@ -248,6 +305,9 @@ func (st *Strategy) Manage(pos *models.Position, s *Series, i int) string {
 	switch {
 	case pos.Stop >= c:
 		return fmt.Sprintf("close %.2f at/below the stop %.2f", c, pos.Stop)
+	case p.ExitOnEMACross && s.CrossFast[i] < s.CrossSlow[i]:
+		cf, cs, _, _ := crossParams(p)
+		return fmt.Sprintf("EMA%d %.2f crossed below EMA%d %.2f", cf, s.CrossFast[i], cs, s.CrossSlow[i])
 	case p.ExitBelowEMAFast && pos.Stage != models.StageInitial && c < s.EMAFast[i]:
 		return fmt.Sprintf("close %.2f below EMA%d %.2f after breakeven", c, p.EMAFast, s.EMAFast[i])
 	case (p.HAExitAlways || pos.Stage != models.StageInitial) && st.haExit(s, i) != "":

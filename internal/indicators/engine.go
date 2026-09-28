@@ -124,3 +124,54 @@ func HeikinAshi(o, h, l, c []float64) (hO, hH, hL, hC []float64) {
 	}
 	return
 }
+
+// Supertrend returns the trend direction (+1 green, −1 red, 0 = not ready)
+// and the Supertrend line, using Wilder ATR(period) and a band multiplier —
+// the same construction as TradingView's built-in Supertrend.
+func Supertrend(h, l, c []float64, period int, mult float64) ([]int8, []float64) {
+	n := len(c)
+	dir, line := make([]int8, n), make([]float64, n)
+	atr := ATR(h, l, c, period)
+	var up, dn float64
+	for i := 0; i < n; i++ {
+		if atr[i] <= 0 {
+			continue
+		}
+		mid := (h[i] + l[i]) / 2
+		bu, bd := mid-mult*atr[i], mid+mult*atr[i]
+		if i == 0 || dir[i-1] == 0 {
+			up, dn = bu, bd
+			if c[i] >= mid {
+				dir[i] = 1
+			} else {
+				dir[i] = -1
+			}
+		} else {
+			pu, pd := up, dn
+			if c[i-1] > pu {
+				up = math.Max(bu, pu)
+			} else {
+				up = bu
+			}
+			if c[i-1] < pd {
+				dn = math.Min(bd, pd)
+			} else {
+				dn = bd
+			}
+			switch {
+			case dir[i-1] == -1 && c[i] > dn:
+				dir[i] = 1
+			case dir[i-1] == 1 && c[i] < up:
+				dir[i] = -1
+			default:
+				dir[i] = dir[i-1]
+			}
+		}
+		if dir[i] == 1 {
+			line[i] = up
+		} else {
+			line[i] = dn
+		}
+	}
+	return dir, line
+}

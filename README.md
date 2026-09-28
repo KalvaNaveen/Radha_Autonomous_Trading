@@ -40,7 +40,7 @@ Building from source (Go 1.22+): `make deps && make test && make build`.
 | 08:45 | **Prepare** | Waits for your Kite login. Reconciles the book with your Kite holdings and GTTs: a position sold while the engine was off gets booked as closed, and a missing stop is re-armed. If the previous evening's run was missed, it's run now to catch up. |
 | 09:20 | **Morning run** | 1) Sells positions flagged the evening before. 2) Sells anything that **gapped below its stop** (a GTT places a *limit* order, which a gap can skip past). 3) Buys the queued candidates, highest relative strength first, with a LIMIT order 0.5% above the ask. It skips a candidate if it opened > 2% above the signal close, opened below its stop, or is at the upper circuit. Every buy gets a GTT stop straight away. |
 | 09:20–15:30 | **Monitor** | Refreshes prices every minute. Detects when a GTT stop has filled and books the trade. Re-arms any stop that's missing, and sells at market if the price is below the stop with no GTT armed. |
-| 15:50 | **Evening run** | Once today's daily candle is final: raises stops (and modifies their GTTs), flags exits for the morning, checks the market regime, and scans the universe. The candidates are queued for the next trading day. |
+| 15:50 | **Evening run** | Once today's daily candle is final: raises stops if ratcheting is on (and modifies their GTTs), flags exits (e.g. EMA10 below EMA20) for the morning, checks the market regime, and scans the universe. The candidates are queued for the next trading day. |
 
 The book (positions, pending candidates, cash, cooldowns) is saved in
 `data/portfolio.json`. You can stop and restart the engine at any time. Open
@@ -50,18 +50,16 @@ positions stay protected by their GTTs at Zerodha while it's off.
 
 ## Strategy
 
-**Trend filter** (every candidate must pass):
-- close above the 50-day EMA, the 20-day EMA above the 50-day EMA, and the 50-day EMA rising over 5 sessions;
+**Filters** (every candidate must pass):
 - price at least ₹50;
-- average daily turnover at least ₹10 crore.
+- average daily turnover at least ₹10 crore;
+- for `breakout`/`pullback` (and for `ema_cross` with `cross_trend_filter: true`): close above the 50-day EMA, the 20-day EMA above the 50-day EMA, and the 50-day EMA rising over 5 sessions.
 
 **Market regime:** new entries are allowed only while NIFTY 50 closes above a rising 50-day EMA. Open positions are always managed.
 
-**Setups** (on the completed daily candle):
-- **Breakout** (default): close above the prior 20-day high, on at least 1.5× average volume.
-- **Pullback** (off by default, `setups: both` turns it on): the low touched the 20-day EMA (within 1%) in the last 3 sessions, and today closed above the 20-day EMA and above yesterday's high, on at least average volume.
+**Entry (default `setups: ema_cross`), on the completed daily candle:** EMA10 crosses above EMA20 while Supertrend(10, 3) is green. The entry is taken only on the day the combined condition turns true (whichever of the two happens last), and bought at the next morning run.
 
-**Heikin-Ashi confirmation:** the signal day's Heikin-Ashi candle must be green (`ha_entry`). Heikin-Ashi prices are used only as a signal; orders, stops and sizing always use real prices.
+Other setups are still available: `breakout` (close above the prior 20-day high on ≥ 1.5× volume), `pullback`, or `both`.
 
 **Ranking:** 60-day return relative to NIFTY 50. Up to 5 positions in total, at most 2 new ones per day.
 
@@ -70,25 +68,24 @@ positions stay protected by their GTTs at Zerodha while it's off.
 - 20% of equity ÷ price;
 - available cash.
 
-**Stops** (they only ever move up; R = entry − initial stop):
-
-| Stage | When | Stop |
-|---|---|---|
-| Initial | On entry | Entry − 3 × ATR(14), kept between 3% and 8% below entry |
-| Breakeven | Close ≥ entry + 1R | Entry + round-trip costs |
-| Locked | Close ≥ entry + 2R | Entry + 1R |
-| Trailing | After breakeven | Highest close − 3 × ATR (only if higher than the current stop) |
+**Protective stop:** entry − 3 × ATR(14), kept between 3% and 8% below entry, placed as a GTT at Zerodha so it works even when this PC is off. With `fixed_stop: true` (default) it never moves. With `fixed_stop: false` it ratchets: +1R → breakeven, +2R → entry + 1R, then highest close − 3 × ATR. `stop_mode: supertrend` uses the green Supertrend line instead of 3 × ATR.
 
 **Exits:**
-- the stop is hit (GTT);
-- after breakeven, a close below the 20-day EMA → sell at the next morning run;
-- after breakeven, 2 red Heikin-Ashi candles in a row → sell at the next morning run (`ha_exit`);
-- time stop: 40 sessions without reaching +1R;
+- EMA10 closes below EMA20 → sell at the next morning run (`exit_on_ema_cross`);
+- the protective stop is hit (GTT), or the stock opens below it;
 - cooldown: no re-entry in the same stock for 5 sessions after an exit.
 
 **Drawdown breaker:** if equity falls 15% below its peak, new entries pause for 20 trading days; then the peak resets to current equity and trading resumes.
 
-**Why these defaults:** `tools/study` replays variants on cached Kite candles over 5 years and each half separately. On the default 25-stock list, the old rules (both setups, 2×ATR stop, no Heikin-Ashi) returned −15.5% with a 27.7% max drawdown; breakout-only + 3×ATR stop + Heikin-Ashi returned +2.8% with a 14.7% drawdown and improved both halves. NIFTY 50 returned +28% over the same period, so this is still not an edge worth live money — widen the universe and re-run the study before trading real capital.
+**Why these defaults:** `tools/study` replays variants on cached Kite candles over 5 years and each half separately. On the default 25-stock list (2021-09 → 2026-09):
+
+| Rules | 5-yr return | Max DD | Profit factor | 1st half | 2nd half |
+|---|---|---|---|---|---|
+| Original (breakout + pullback, ratcheting stop) | −15.5% | 27.7% | 0.81 | +7.0% | −25.9% |
+| Breakout + Heikin-Ashi | +2.8% | 14.7% | 1.05 | +13.8% | −6.1% |
+| **EMA10/20 cross + Supertrend, fixed 3×ATR stop** | **+15.0%** | **11.7%** | **1.37** | **+6.9%** | **+2.3%** |
+
+NIFTY 50 returned +28% over the same period. The EMA-cross rules are the first set that made money in both halves, but ~110 trades on 25 stocks is a small sample: widen the universe and re-run the study before trading real capital.
 
 **Costs modelled:** Zerodha delivery charges.
 - brokerage ₹0;
@@ -191,7 +188,7 @@ tools/kitemock        Kite simulator for rehearsals
 
 `make test` runs:
 - **Indicators:** EMA, ATR and highs.
-- **Strategy:** breakout detection, no longs in downtrends, the liquidity filter, the breakeven → lock → trail ratchet, the stop never moving down, sizing limits, delivery charges to the paisa.
+- **Strategy:** EMA10/20 cross + Supertrend entry and cross-down exit, Supertrend and Heikin-Ashi maths, breakout detection, no longs in downtrends, the liquidity filter, the breakeven → lock → trail ratchet, the stop never moving down, sizing limits, delivery charges to the paisa.
 - **Backtester:** invariants (cash never negative, position cap respected, no overlapping trades, every trade pays charges) and gap-through-stop fills at the open.
 - **Order manager:** limiter caps, priority order, retry budget, buy/sell round trip.
 - **Candle cache:** incremental downloads, chunking.

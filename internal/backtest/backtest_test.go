@@ -36,6 +36,8 @@ func synth(seed int64, n int, start, drift, vol float64) []models.Bar {
 
 func TestBacktestInvariants(t *testing.T) {
 	cfg := config.Defaults()
+	cfg.Strategy.Setups, cfg.Strategy.FixedStop, cfg.Strategy.ExitOnEMACross = "breakout", false, false
+	cfg.Strategy.ExitBelowEMAFast, cfg.Strategy.MaxHoldBars = true, 40
 	var ins []Instrument
 	for i := 0; i < 12; i++ {
 		ins = append(ins, Instrument{Symbol: string(rune('A' + i)), Token: uint32(i + 1),
@@ -87,6 +89,8 @@ func TestBacktestInvariants(t *testing.T) {
 // A position that gaps below its stop must be sold at the open, not the stop.
 func TestGapThroughStopFillsAtOpen(t *testing.T) {
 	cfg := config.Defaults()
+	cfg.Strategy.Setups, cfg.Strategy.FixedStop, cfg.Strategy.ExitOnEMACross = "breakout", false, false
+	cfg.Strategy.ExitBelowEMAFast, cfg.Strategy.MaxHoldBars = true, 40
 	cfg.Market.RegimeFilter = false
 	cfg.Strategy.MinTurnoverCr = 0
 	n := 140

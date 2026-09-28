@@ -9,7 +9,13 @@ import (
 	"github.com/nkalva/kitealgo/pkg/models"
 )
 
-func cfg() config.Config { return config.Defaults() }
+// cfg returns the breakout/ratchet rule set most tests below were written for.
+func cfg() config.Config {
+	c := config.Defaults()
+	c.Strategy.Setups, c.Strategy.FixedStop, c.Strategy.ExitOnEMACross = "breakout", false, false
+	c.Strategy.ExitBelowEMAFast, c.Strategy.MaxHoldBars = true, 40
+	return c
+}
 
 // bars builds daily bars from closes with a 1% range and constant volume.
 func bars(closes []float64, vol float64) []models.Bar {
@@ -155,6 +161,7 @@ func TestHeikinAshiEntryFilter(t *testing.T) {
 func TestHeikinAshiExit(t *testing.T) {
 	c := cfg()
 	c.Strategy.ExitBelowEMAFast = false
+	c.Strategy.HAExit, c.Strategy.HAExitBars = "red", 2
 	st := NewStrategy(c.Strategy, c.Costs)
 	cl := uptrend(120, 500, 1)
 	for k := 116; k < 120; k++ { // four falling days at the end
@@ -171,5 +178,44 @@ func TestHeikinAshiExit(t *testing.T) {
 	pos = &models.Position{EntryPrice: 600, InitialStop: 560, Stop: 560, Stage: models.StageInitial, HighestClose: 600, Quantity: 1}
 	if r := st.Manage(pos, s, 119); r != "" {
 		t.Fatalf("before breakeven the HA exit is off by default, got %q", r)
+	}
+}
+
+func TestEMACrossSupertrendEntryAndExit(t *testing.T) {
+	c := config.Defaults() // ema_cross is the default rule set
+	st := NewStrategy(c.Strategy, c.Costs)
+	cl := uptrend(80, 600, -2)                     // falling: EMA10 < EMA20, Supertrend red
+	cl = append(cl, uptrend(60, cl[79]+3, 4)...)   // strong rise: cross up, Supertrend green
+	cl = append(cl, uptrend(40, cl[139]-5, -5)...) // fall again: cross down
+	s := NewSeries(bars(cl, 1e6), c.Strategy)
+	entries := 0
+	first := -1
+	for i := st.Warmup(); i < 140; i++ {
+		if sig, ok, _ := st.Evaluate("X", 1, s, i, nil, 0); ok {
+			entries++
+			if first < 0 {
+				first = i
+			}
+			if sig.Setup != models.SetupEMACross || !(s.CrossFast[i] > s.CrossSlow[i] && s.STDir[i] == 1) {
+				t.Fatalf("bad signal at %d: %+v", i, sig)
+			}
+		}
+	}
+	if entries != 1 {
+		t.Fatalf("want exactly one entry on the day both conditions turn true, got %d", entries)
+	}
+	pos := &models.Position{EntryPrice: cl[first], InitialStop: cl[first] * 0.9, Stop: cl[first] * 0.9, Stage: models.StageInitial, HighestClose: cl[first], Quantity: 1}
+	exit := -1
+	for i := first + 1; i < len(cl); i++ {
+		if r := st.Manage(pos, s, i); r != "" {
+			exit = i
+			break
+		}
+	}
+	if exit < 140 || s.CrossFast[exit] >= s.CrossSlow[exit] {
+		t.Fatalf("exit must come from EMA10 crossing below EMA20 in the final fall, got bar %d", exit)
+	}
+	if pos.Stop != cl[first]*0.9 {
+		t.Fatalf("fixed_stop: the stop must not move (got %.2f)", pos.Stop)
 	}
 }
