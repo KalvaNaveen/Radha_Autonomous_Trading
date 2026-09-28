@@ -53,14 +53,20 @@ strategy:             # daily candles
   rs_lookback: 60                # rank candidates by 60-day return vs the index
   cooldown_bars: 5               # days to wait before re-entering a stock after an exit
   # ── Protective stop (a GTT at Zerodha, works even if this PC is off) ─────
-  stop_mode: atr                 # atr: entry − stop_atr_mult × ATR · supertrend: the green Supertrend line
+  stop_mode: atr                 # atr: entry − stop_atr_mult × ATR · supertrend: green Supertrend line · swing_low
   stop_atr_mult: 3.0
+  swing_low_bars: 10             # stop_mode swing_low: just below the lowest low of the last 10 days
   min_stop_pct: 3                # stop kept 3%–8% below entry
   max_stop_pct: 8
-  fixed_stop: true               # true: the stop never moves; exits come from the EMA cross
-  breakeven_r: 1.0               # fixed_stop false: at +1R stop → entry + costs…
-  lock_r: 2.0                    # …at +2R → entry + 1R…
-  trail_atr_mult: 3.0            # …then highest close − 3 × ATR
+  breakeven_at_r: 1.5            # once a close reaches +1.5R the stop moves to entry + charges — a winner can't turn into a loss
+  trail_mode: off                # off | atr | supertrend — 5-yr study: every trail cut winners short (the EMA cross already trails)
+  trail_start_r: 2               # start trailing at +2R (if trail_mode is on)
+  trail_atr_mult: 3.0            # trail_mode atr: highest close − 3 × ATR
+  target_r: 0                    # profit target at +N R (0 = off) — BACKTEST ONLY; results were unstable (4R/5R/6R/8R jumped around)
+  partial_pct: 100               # % sold at the target; below 100 books part and moves the rest to breakeven
+  fixed_stop: true               # true: legacy ratchet below is off
+  breakeven_r: 1.0               # legacy ratchet (fixed_stop false): +1R → breakeven…
+  lock_r: 2.0                    # …+2R → entry + 1R, then trail_atr_mult trailing
   # ── Exits ────────────────────────────────────────────────────────────────
   exit_on_ema_cross: true        # EMA10 closes below EMA20 → sell at the next morning run
   exit_below_ema_fast: false     # close below EMA20 after breakeven → sell

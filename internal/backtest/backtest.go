@@ -14,6 +14,7 @@
 package backtest
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -200,6 +201,28 @@ func Run(in Input) Result {
 				sell(p, b.Open*(1-slip), d, "gapped below stop", k)
 			case b.Low <= p.Stop:
 				sell(p, p.Stop*(1-slip), d, "stop hit ("+string(p.Stage)+")", k)
+			case st.Target(p) > 0 && b.High >= st.Target(p):
+				// Profit target (a limit sell): filled at the target, or at the
+				// open if the stock gapped above it. Same-bar stop-and-target is
+				// resolved as the stop above (conservative).
+				px := math.Max(b.Open, st.Target(p)) * (1 - slip)
+				part := int(math.Floor(float64(p.Quantity) * cfg.Strategy.PartialPct / 100))
+				if cfg.Strategy.PartialPct <= 0 || cfg.Strategy.PartialPct >= 100 || part < 1 || p.Quantity-part < 1 {
+					sell(p, px, d, fmt.Sprintf("target +%.1fR hit", cfg.Strategy.TargetR), k)
+					break
+				}
+				booked := *p
+				booked.Quantity = part
+				booked.EntryCosts = p.EntryCosts * float64(part) / float64(p.Quantity)
+				t := swing.CloseTrade(&booked, px, d, fmt.Sprintf("partial %.0f%% at target +%.1fR", cfg.Strategy.PartialPct, cfg.Strategy.TargetR), st.Costs)
+				cash += px*float64(part) - (t.Costs - booked.EntryCosts)
+				res.Trades = append(res.Trades, t)
+				p.Quantity -= part
+				p.EntryCosts -= booked.EntryCosts
+				p.PartialDone = true
+				if be := p.EntryPrice * (1 + st.Costs.RoundTripFrac()); be > p.Stop {
+					p.Stop, p.Stage = be, models.StageBreakeven // the rest can no longer lose
+				}
 			}
 		}
 

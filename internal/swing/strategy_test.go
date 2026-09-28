@@ -183,6 +183,7 @@ func TestHeikinAshiExit(t *testing.T) {
 
 func TestEMACrossSupertrendEntryAndExit(t *testing.T) {
 	c := config.Defaults() // ema_cross is the default rule set
+	c.Strategy.BreakevenAtR = 0 // test the pure fixed stop
 	st := NewStrategy(c.Strategy, c.Costs)
 	cl := uptrend(80, 600, -2)                     // falling: EMA10 < EMA20, Supertrend red
 	cl = append(cl, uptrend(60, cl[79]+3, 4)...)   // strong rise: cross up, Supertrend green
@@ -217,5 +218,28 @@ func TestEMACrossSupertrendEntryAndExit(t *testing.T) {
 	}
 	if pos.Stop != cl[first]*0.9 {
 		t.Fatalf("fixed_stop: the stop must not move (got %.2f)", pos.Stop)
+	}
+}
+
+func TestBreakevenAtR(t *testing.T) {
+	c := config.Defaults() // fixed stop + breakeven_at_r 1.5
+	st := NewStrategy(c.Strategy, c.Costs)
+	s := NewSeries(bars(uptrend(120, 500, 1), 1e6), c.Strategy)
+	pos := &models.Position{EntryPrice: 100, InitialStop: 90, Stop: 90, Stage: models.StageInitial, HighestClose: 100, Quantity: 1}
+	s.Bars[100].Close, s.CrossFast[100], s.CrossSlow[100] = 112, 2, 1 // +1.2R: stop stays
+	st.Manage(pos, s, 100)
+	if pos.Stop != 90 {
+		t.Fatalf("below +1.5R the stop must not move, got %.2f", pos.Stop)
+	}
+	s.Bars[101].Close, s.CrossFast[101], s.CrossSlow[101] = 116, 2, 1 // +1.6R: breakeven
+	st.Manage(pos, s, 101)
+	if pos.Stop <= 100 || pos.Stage != models.StageBreakeven {
+		t.Fatalf("at +1.5R the stop must move to entry + costs: %.2f %s", pos.Stop, pos.Stage)
+	}
+	be := pos.Stop
+	s.Bars[102].Close, s.CrossFast[102], s.CrossSlow[102] = 108, 2, 1 // pullback: stop must not drop
+	st.Manage(pos, s, 102)
+	if pos.Stop != be {
+		t.Fatal("stop must never move down")
 	}
 }

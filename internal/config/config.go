@@ -98,7 +98,13 @@ type StrategyConfig struct {
 	CrossTrendFilter bool    `yaml:"cross_trend_filter"` // also require close > rising EMA50
 	ExitOnEMACross   bool    `yaml:"exit_on_ema_cross"`  // EMA(fast) closes below EMA(slow) → exit next morning
 	StopMode         string  `yaml:"stop_mode"`          // atr (entry − stop_atr_mult × ATR) | supertrend (the green line)
-	FixedStop        bool    `yaml:"fixed_stop"`         // true: the initial stop never moves (no breakeven/lock/trailing)
+	FixedStop        bool    `yaml:"fixed_stop"`         // true: no legacy breakeven/lock/trail ratchet (the options below still apply)
+	SwingLowBars     int     `yaml:"swing_low_bars"`     // stop_mode swing_low: lowest low of this many bars
+	BreakevenAtR     float64 `yaml:"breakeven_at_r"`     // move the stop to entry + costs once the close reaches +this R (0 = off)
+	TrailMode        string  `yaml:"trail_mode"`         // off | atr (highest close − trail_atr_mult × ATR) | supertrend (green line)
+	TrailStartR      float64 `yaml:"trail_start_r"`      // start trailing once the close reaches +this R (0 = from entry)
+	TargetR          float64 `yaml:"target_r"`           // profit target at entry + this R (0 = off) — backtest only for now
+	PartialPct       float64 `yaml:"partial_pct"`        // % of the position sold at the target (100 = all); rest trails, stop → breakeven
 	RegimeMode       string  `yaml:"regime_mode"`        // basic: index > rising EMA50 · strict: also index > EMA20 > EMA50
 
 	// Heikin-Ashi filters (signals only — orders, stops and sizing use real prices).
@@ -198,6 +204,7 @@ func Defaults() Config {
 			Setups: "ema_cross", RegimeMode: "basic",
 			CrossFast: 10, CrossSlow: 20, SupertrendPeriod: 10, SupertrendMult: 3,
 			ExitOnEMACross: true, StopMode: "atr", FixedStop: true,
+			SwingLowBars: 10, BreakevenAtR: 1.5, TrailMode: "off", TrailStartR: 2, TargetR: 0, PartialPct: 100,
 			HAEntry: "off", HAExit: "off", HAExitBars: 2, HAWickPct: 10,
 		},
 		Risk: RiskConfig{Capital: 100000, RiskPerTradePct: 1.0, MaxPositionPct: 20, MaxPositions: 5,
@@ -265,8 +272,14 @@ func (c Config) Validate() error {
 	if s.Setups == "ema_cross" && s.CrossFast > 0 && s.CrossSlow <= s.CrossFast {
 		add("strategy: ema_cross_fast must be below ema_cross_slow")
 	}
-	if !oneOf(s.StopMode, "", "atr", "supertrend") {
-		add("strategy.stop_mode must be atr or supertrend, got %q", s.StopMode)
+	if !oneOf(s.StopMode, "", "atr", "supertrend", "swing_low") {
+		add("strategy.stop_mode must be atr, supertrend or swing_low, got %q", s.StopMode)
+	}
+	if !oneOf(s.TrailMode, "", "off", "atr", "supertrend") {
+		add("strategy.trail_mode must be off, atr or supertrend, got %q", s.TrailMode)
+	}
+	if s.TargetR < 0 || s.PartialPct < 0 || s.PartialPct > 100 {
+		add("strategy: target_r must be >= 0 and partial_pct 0..100")
 	}
 	if !oneOf(s.RegimeMode, "", "basic", "strict") {
 		add("strategy.regime_mode must be basic or strict, got %q", s.RegimeMode)

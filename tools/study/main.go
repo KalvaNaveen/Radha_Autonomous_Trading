@@ -145,6 +145,63 @@ func main() {
 			}
 		}
 	}
+	if *grid == "exits" {
+		vs = []variant{{"current: fixed 3xATR stop, exit on cross", func(*config.StrategyConfig) {}}}
+		add := func(name string, f func(s *config.StrategyConfig)) { vs = append(vs, variant{name, f}) }
+		for _, m := range []float64{2, 2.5, 4} {
+			m := m
+			add(fmt.Sprintf("A stop %.1fxATR", m), func(s *config.StrategyConfig) { s.StopATRMult = m })
+		}
+		add("A stop supertrend line", func(s *config.StrategyConfig) { s.StopMode = "supertrend" })
+		for _, n := range []int{10, 20} {
+			n := n
+			add(fmt.Sprintf("A stop swing low %d", n), func(s *config.StrategyConfig) { s.StopMode, s.SwingLowBars = "swing_low", n })
+		}
+		for _, r := range []float64{1, 1.5, 2} {
+			r := r
+			add(fmt.Sprintf("B breakeven at +%.1fR", r), func(s *config.StrategyConfig) { s.BreakevenAtR = r })
+		}
+		for _, m := range []float64{3, 4, 5} {
+			for _, r := range []float64{1, 2} {
+				m, r := m, r
+				add(fmt.Sprintf("C trail %.0fxATR from +%.0fR", m, r), func(s *config.StrategyConfig) { s.TrailMode, s.TrailATRMult, s.TrailStartR = "atr", m, r })
+			}
+		}
+		for _, r := range []float64{0, 1, 2} {
+			r := r
+			add(fmt.Sprintf("D trail supertrend from +%.0fR", r), func(s *config.StrategyConfig) { s.TrailMode, s.TrailStartR = "supertrend", r })
+		}
+		for _, r := range []float64{3, 5} {
+			r := r
+			add(fmt.Sprintf("E target +%.0fR (all)", r), func(s *config.StrategyConfig) { s.TargetR, s.PartialPct = r, 100 })
+		}
+		for _, r := range []float64{2, 3} {
+			r := r
+			add(fmt.Sprintf("E book 50%% at +%.0fR, rest to cross", r), func(s *config.StrategyConfig) { s.TargetR, s.PartialPct = r, 50 })
+		}
+		add("E book 50% at +2R, rest supertrend trail", func(s *config.StrategyConfig) { s.TargetR, s.PartialPct, s.TrailMode = 2, 50, "supertrend" })
+		add("F no cross exit, supertrend trail only", func(s *config.StrategyConfig) { s.ExitOnEMACross, s.TrailMode = false, "supertrend" })
+		add("F no cross exit, 4xATR trail only", func(s *config.StrategyConfig) { s.ExitOnEMACross, s.TrailMode, s.TrailATRMult = false, "atr", 4 })
+	}
+	if *grid == "combo" {
+		vs = []variant{{"current: fixed 3xATR stop, exit on cross", func(*config.StrategyConfig) {}}}
+		add := func(name string, f func(s *config.StrategyConfig)) { vs = append(vs, variant{name, f}) }
+		for _, t := range []float64{4, 5, 6, 8} {
+			t := t
+			add(fmt.Sprintf("target +%.0fR", t), func(s *config.StrategyConfig) { s.TargetR, s.PartialPct = t, 100 })
+		}
+		for _, be := range []float64{1.25, 1.5, 1.75} {
+			be := be
+			add(fmt.Sprintf("breakeven +%.2fR", be), func(s *config.StrategyConfig) { s.BreakevenAtR = be })
+		}
+		add("2.5xATR + BE 1.5R", func(s *config.StrategyConfig) { s.StopATRMult, s.BreakevenAtR = 2.5, 1.5 })
+		add("BE 1.5R + target 5R", func(s *config.StrategyConfig) { s.BreakevenAtR, s.TargetR, s.PartialPct = 1.5, 5, 100 })
+		add("2.5xATR + target 5R", func(s *config.StrategyConfig) { s.StopATRMult, s.TargetR, s.PartialPct = 2.5, 5, 100 })
+		add("2.5xATR + BE 1.5R + target 5R", func(s *config.StrategyConfig) {
+			s.StopATRMult, s.BreakevenAtR, s.TargetR, s.PartialPct = 2.5, 1.5, 5, 100
+		})
+		add("2.0xATR + BE 1.5R", func(s *config.StrategyConfig) { s.StopATRMult, s.BreakevenAtR = 2, 1.5 })
+	}
 	fmt.Printf("%-62s | %8s %6s %5s %5s %6s %6s | %7s %5s | %7s %5s\n", "variant", "return%", "maxDD%", "PF", "trd", "win%", "avgW/L", "H1 ret%", "H1 PF", "H2 ret%", "H2 PF")
 	fmt.Println(strings.Repeat("-", 142))
 	for _, v := range vs {

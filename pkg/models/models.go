@@ -264,6 +264,7 @@ type Position struct {
 	LastClose       float64   `json:"last_close"`
 	LastPrice       float64   `json:"last_price"`
 	EntryCosts      float64   `json:"entry_costs"`
+	PartialDone     bool      `json:"partial_done,omitempty"` // part of the position already booked at the target
 }
 
 // RiskPerShare is 1R.

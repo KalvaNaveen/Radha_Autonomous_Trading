@@ -232,8 +232,19 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 		why += "; Heikin-Ashi confirms"
 	}
 	stop := st.InitialStop(c, atr)
-	if p.StopMode == "supertrend" && s.STDir[i] == 1 && s.STLine[i] > 0 && s.STLine[i] < c {
+	switch {
+	case p.StopMode == "supertrend" && s.STDir[i] == 1 && s.STLine[i] > 0 && s.STLine[i] < c:
 		stop = st.clampStop(c, s.STLine[i])
+	case p.StopMode == "swing_low":
+		n := p.SwingLowBars
+		if n <= 0 {
+			n = 10
+		}
+		lo := b.Low
+		for k := i - n + 1; k <= i && k >= 0; k++ {
+			lo = math.Min(lo, s.Bars[k].Low)
+		}
+		stop = st.clampStop(c, lo*0.995) // just below the recent swing low
 	}
 	rs := st.RelativeStrength(s, i, idx, j)
 	return models.Signal{InstrumentToken: token, Symbol: sym, Date: b.Date, Setup: kind, Close: c, Stop: stop,
@@ -246,6 +257,35 @@ func (st *Strategy) InitialStop(entry, atr float64) float64 {
 	d = math.Max(d, entry*indicators.Pct(st.P.MinStopPct))
 	d = math.Min(d, entry*indicators.Pct(st.P.MaxStopPct))
 	return entry - d
+}
+
+// trail applies breakeven_at_r and trail_mode (end of day, stop only rises).
+func (st *Strategy) trail(pos *models.Position, s *Series, i int, R float64, raise func(float64, models.StopStage)) {
+	p := st.P
+	if pos.PartialDone || (p.BreakevenAtR > 0 && pos.HighestClose >= pos.EntryPrice+p.BreakevenAtR*R) {
+		raise(pos.EntryPrice*(1+st.Costs.RoundTripFrac()), models.StageBreakeven)
+	}
+	if p.TrailMode == "" || p.TrailMode == "off" || pos.HighestClose < pos.EntryPrice+p.TrailStartR*R {
+		return
+	}
+	switch p.TrailMode {
+	case "atr":
+		if s.ATR[i] > 0 {
+			raise(pos.HighestClose-p.TrailATRMult*s.ATR[i], models.StageTrailing)
+		}
+	case "supertrend":
+		if s.STDir[i] == 1 && s.STLine[i] > 0 {
+			raise(s.STLine[i], models.StageTrailing)
+		}
+	}
+}
+
+// Target returns the profit-target price for a position (0 = none).
+func (st *Strategy) Target(pos *models.Position) float64 {
+	if st.P.TargetR <= 0 || pos.PartialDone {
+		return 0
+	}
+	return pos.EntryPrice + st.P.TargetR*pos.RiskPerShare()
 }
 
 // clampStop keeps a stop between min_stop_pct and max_stop_pct below entry.
@@ -295,6 +335,9 @@ func (st *Strategy) Manage(pos *models.Position, s *Series, i int) string {
 	}
 	if gain >= p.LockR*R {
 		raise(pos.EntryPrice+R, models.StageLocked)
+	}
+	if p.FixedStop {
+		st.trail(pos, s, i, R, raise)
 	}
 	if !p.FixedStop && pos.Stage != models.StageInitial && s.ATR[i] > 0 {
 		if trail := pos.HighestClose - p.TrailATRMult*s.ATR[i]; trail > pos.Stop+1e-9 {

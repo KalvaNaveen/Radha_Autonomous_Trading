@@ -61,6 +61,9 @@ type Engine struct {
 
 // New wires the daemon.
 func New(cfg config.Config, log *slog.Logger) (*Engine, error) {
+	if cfg.Strategy.TargetR > 0 {
+		return nil, fmt.Errorf("strategy.target_r is backtest-only for now (the engine does not place target orders); set it to 0")
+	}
 	sess, err := clock.NewSession(cfg.Session, cfg.Holidays)
 	if err != nil {
 		return nil, err

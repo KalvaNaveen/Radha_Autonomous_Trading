@@ -68,7 +68,9 @@ Other setups are still available: `breakout` (close above the prior 20-day high 
 - 20% of equity ÷ price;
 - available cash.
 
-**Protective stop:** entry − 3 × ATR(14), kept between 3% and 8% below entry, placed as a GTT at Zerodha so it works even when this PC is off. With `fixed_stop: true` (default) it never moves. With `fixed_stop: false` it ratchets: +1R → breakeven, +2R → entry + 1R, then highest close − 3 × ATR. `stop_mode: supertrend` uses the green Supertrend line instead of 3 × ATR.
+**Protective stop:** entry − 3 × ATR(14), kept between 3% and 8% below entry, placed as a GTT at Zerodha so it works even when this PC is off. Once a close reaches +1.5R, the stop moves to entry + charges (`breakeven_at_r`), so a trade that was well in profit can no longer turn into a loss. It never moves down.
+
+Also available (all tested, none adopted — see below): `stop_mode: supertrend | swing_low`, `trail_mode: atr | supertrend`, `target_r` + `partial_pct` (backtest only), and the legacy ratchet (`fixed_stop: false`).
 
 **Exits:**
 - EMA10 closes below EMA20 → sell at the next morning run (`exit_on_ema_cross`);
@@ -84,6 +86,8 @@ Other setups are still available: `breakout` (close above the prior 20-day high 
 | Original (breakout + pullback, ratcheting stop) | −15.5% | 27.7% | 0.81 | +7.0% | −25.9% |
 | Breakout + Heikin-Ashi | +2.8% | 14.7% | 1.05 | +13.8% | −6.1% |
 | **EMA10/20 cross + Supertrend, fixed 3×ATR stop** | **+15.0%** | **11.7%** | **1.37** | **+6.9%** | **+2.3%** |
+
+**Stops, trailing and targets** (same study, on top of the EMA-cross rules): every trailing stop made results worse — the EMA10/20 cross-down already works as a trailing exit, and a tighter trail only cut winners short. Profit targets were unstable (+4R: +5.7%, +5R: +15.3%, +6R: +17.6%, +8R: +13.3%), which is noise, not an edge. Breakeven at +1.5R was neutral over 5 years (+14.9% vs +15.0%) and better in 2024–26 (+4.3% vs +2.3%), so it is on for capital protection.
 
 NIFTY 50 returned +28% over the same period. The EMA-cross rules are the first set that made money in both halves, but ~110 trades on 25 stocks is a small sample: widen the universe and re-run the study before trading real capital.
 
