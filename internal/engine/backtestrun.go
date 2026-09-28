@@ -39,6 +39,36 @@ func (e *Engine) LatestBacktest() ([]byte, error) {
 	return os.ReadFile(filepath.Join(e.btDir(), "result.json"))
 }
 
+// ResetBacktest deletes the last backtest result. With clearCandles it also
+// deletes the downloaded daily candles (and the instrument lists), so the
+// next backtest or evening run downloads fresh history from Kite.
+func (e *Engine) ResetBacktest(clearCandles bool) error {
+	e.mu.Lock()
+	if e.bt.Running {
+		e.mu.Unlock()
+		return errors.New("a backtest is running — wait for it to finish")
+	}
+	e.bt = BacktestStatus{}
+	e.mu.Unlock()
+	if err := os.RemoveAll(e.btDir()); err != nil {
+		return fmt.Errorf("cannot delete the backtest result: %w", err)
+	}
+	if clearCandles {
+		for _, d := range []string{"candles", "instruments"} {
+			if err := os.RemoveAll(filepath.Join(e.cfg.Paths.DataDir, d)); err != nil {
+				return fmt.Errorf("cannot delete %s: %w", d, err)
+			}
+		}
+	}
+	e.log.Info("backtest reset from UI", "cleared_candles", clearCandles)
+	return nil
+}
+
+// RulesNow describes the rules the engine is running with.
+func (e *Engine) RulesNow() (summary, hash string) {
+	return backtest.DescribeRules(e.cfg), backtest.RulesHash(e.cfg)
+}
+
 // ReportPath is the HTML report of the last run.
 func (e *Engine) ReportPath() string { return filepath.Join(e.btDir(), "report.html") }
 

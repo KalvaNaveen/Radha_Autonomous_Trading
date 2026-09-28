@@ -14,9 +14,13 @@
 package backtest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nkalva/kitealgo/internal/config"
@@ -84,6 +88,83 @@ type Result struct {
 	Equity  []EquityPoint  `json:"equity"`
 	Config  config.Config  `json:"-"`
 	Skipped map[string]int `json:"skipped_reasons"`
+	Rules   string         `json:"rules"`      // human summary of the rules used
+	RulesID string         `json:"rules_hash"` // RulesHash of the config used
+}
+
+// RulesHash fingerprints the settings that change backtest results
+// (strategy, risk, costs, market), so the UI can flag a stale result.
+func RulesHash(c config.Config) string {
+	raw, _ := json.Marshal(struct {
+		S config.StrategyConfig
+		R config.RiskConfig
+		C config.CostsConfig
+		M config.MarketConfig
+	}{c.Strategy, c.Risk, c.Costs, c.Market})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:8])
+}
+
+// DescribeRules is a one-line summary of the entry, stop and exit rules.
+func DescribeRules(c config.Config) string {
+	s := c.Strategy
+	var parts []string
+	switch s.Setups {
+	case "ema_cross":
+		f, sl := s.CrossFast, s.CrossSlow
+		if f <= 0 {
+			f = 10
+		}
+		if sl <= f {
+			sl = 20
+		}
+		parts = append(parts, fmt.Sprintf("entry EMA%d/%d cross + Supertrend(%d, %g)", f, sl, s.SupertrendPeriod, s.SupertrendMult))
+	case "", "both":
+		parts = append(parts, "entry breakout + pullback")
+	default:
+		parts = append(parts, "entry "+s.Setups)
+	}
+	if s.HAEntry != "" && s.HAEntry != "off" {
+		parts = append(parts, "HA "+s.HAEntry+" entry")
+	}
+	switch s.StopMode {
+	case "supertrend":
+		parts = append(parts, "stop Supertrend line")
+	case "swing_low":
+		parts = append(parts, fmt.Sprintf("stop %d-day swing low", s.SwingLowBars))
+	default:
+		parts = append(parts, fmt.Sprintf("stop %g×ATR", s.StopATRMult))
+	}
+	if !s.FixedStop {
+		parts = append(parts, "ratchet +1R/+2R/trail")
+	}
+	if s.BreakevenAtR > 0 {
+		parts = append(parts, fmt.Sprintf("breakeven +%gR", s.BreakevenAtR))
+	}
+	if s.TrailMode != "" && s.TrailMode != "off" {
+		parts = append(parts, "trail "+s.TrailMode)
+	}
+	if s.TargetR > 0 {
+		parts = append(parts, fmt.Sprintf("target +%gR (%g%%)", s.TargetR, s.PartialPct))
+	}
+	var exits []string
+	if s.ExitOnEMACross {
+		exits = append(exits, "EMA cross down")
+	}
+	if s.ExitBelowEMAFast {
+		exits = append(exits, "close < EMA20")
+	}
+	if s.HAExit != "" && s.HAExit != "off" {
+		exits = append(exits, "HA "+s.HAExit)
+	}
+	if s.MaxHoldBars > 0 {
+		exits = append(exits, fmt.Sprintf("time stop %dd", s.MaxHoldBars))
+	}
+	if len(exits) > 0 {
+		parts = append(parts, "exit "+strings.Join(exits, ", "))
+	}
+	parts = append(parts, fmt.Sprintf("risk %g%%/trade, max %d positions", c.Risk.RiskPerTradePct, c.Risk.MaxPositions))
+	return strings.Join(parts, " · ")
 }
 
 type inst struct {
@@ -112,7 +193,7 @@ func Run(in Input) Result {
 	positions := map[string]*models.Position{}
 	cooldown := map[string]int{} // symbol → index-bar number when re-entry is allowed
 	var pending []models.Signal
-	res := Result{Config: cfg, Skipped: map[string]int{}}
+	res := Result{Config: cfg, Skipped: map[string]int{}, Rules: DescribeRules(cfg), RulesID: RulesHash(cfg)}
 	var benchBase float64
 	exposedDays, days := 0, 0
 

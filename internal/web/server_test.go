@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -97,5 +99,48 @@ func TestLoginRedirectOnAnyPath(t *testing.T) {
 		if res.StatusCode != http.StatusFound || !strings.Contains(loc, "login_error") {
 			t.Fatalf("%s: want redirect to the panel with an error (no real Kite here), got %d %q", p, res.StatusCode, loc)
 		}
+	}
+}
+
+func TestBacktestReset(t *testing.T) {
+	cfg := config.Defaults()
+	dir := t.TempDir()
+	cfg.Paths.DataDir, cfg.Paths.JournalDir, cfg.Paths.UniverseFile = dir+"/data", dir+"/journal", dir+"/universe.csv"
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	eng, err := engine.New(cfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(eng, NewLogRing(10), log, "test").Handler())
+	defer ts.Close()
+	for _, f := range []string{"/data/backtest/latest/result.json", "/data/candles/1.json"} {
+		_ = os.MkdirAll(filepath.Dir(dir+f), 0o755)
+		_ = os.WriteFile(dir+f, []byte(`{"summary":{}}`), 0o644)
+	}
+	res, _ := http.Get(ts.URL + "/api/backtest")
+	b, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(b), `"result"`) || !strings.Contains(string(b), `"rules_hash"`) {
+		t.Fatalf("backtest before reset: %s", b)
+	}
+	reset := func(body string) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/backtest/reset", strings.NewReader(body))
+		req.Header.Set("X-Kitealgo", "1")
+		r, _ := http.DefaultClient.Do(req)
+		return r.StatusCode
+	}
+	if c := reset(`{}`); c != 200 {
+		t.Fatalf("reset: %d", c)
+	}
+	if _, err := os.Stat(dir + "/data/backtest/latest/result.json"); !os.IsNotExist(err) {
+		t.Fatal("result must be deleted")
+	}
+	if _, err := os.Stat(dir + "/data/candles/1.json"); err != nil {
+		t.Fatal("candles must be kept unless asked")
+	}
+	if c := reset(`{"clear_candles":true}`); c != 200 {
+		t.Fatalf("reset with candles: %d", c)
+	}
+	if _, err := os.Stat(dir + "/data/candles"); !os.IsNotExist(err) {
+		t.Fatal("candles must be deleted when asked")
 	}
 }

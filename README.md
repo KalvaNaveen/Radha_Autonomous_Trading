@@ -105,7 +105,7 @@ Every number above can be changed in `config.yaml`.
 
 ## Backtesting
 
-- **Control panel:** **Backtest** tab → choose the number of years → **Run backtest**. It uses today's Kite login to download daily candles and caches them in `data/candles/`, so later runs only fetch the new days.
+- **Control panel:** **Backtest** tab → choose the number of years → **Run backtest**. **Reset…** clears the saved result (tick the box to also delete the downloaded candles and re-download them). A result made with different rules than the engine now uses is marked **Out of date**. It uses today's Kite login to download daily candles and caches them in `data/candles/`, so later runs only fetch the new days.
 - **Command line:** `radha-backtest -years 5` downloads from Kite. `radha-backtest -csv ./history -years 5` works offline from CSV files (`date,open,high,low,close,volume`, one file per stock plus `NIFTY50.csv`).
 
 The simulation, day by day:

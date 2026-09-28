@@ -117,10 +117,17 @@ svg .eq{fill:none;stroke:var(--accent);stroke-width:2}svg .bm{fill:none;stroke:v
         <label style="margin:0">Years of history</label>
         <select id="btYears" style="width:auto"><option>1</option><option>2</option><option>3</option><option selected>5</option><option>7</option><option>10</option></select>
         <button class="primary" id="btRun">Run backtest</button>
+        <button id="btResetBtn" title="Clear the saved result (and optionally the downloaded candles)">Reset…</button>
         <span id="btStatus" class="muted"></span>
         <div class="spacer"></div><a class="btn" id="btReport" href="/backtest/report" target="_blank" hidden>Open full report ↗</a>
       </div>
       <p class="muted">Downloads daily candles for every stock in your universe plus the index (needs today's Kite login; cached afterwards), then replays the exact live rules — next-day-open entries, gap-aware stops, delivery charges and slippage.</p>
+      <div id="btReset" class="banner warn" hidden>
+        <b>Reset the backtest?</b> This deletes the saved result shown below. Your paper portfolio, trades journal and settings are not touched.
+        <label class="row" style="margin:8px 0;color:inherit"><input type="checkbox" id="btClearCandles" style="width:auto"> Also delete the downloaded daily candles, so the next run downloads fresh history from Kite (slower; needs today's login)</label>
+        <div class="row"><button class="primary" id="btResetGo">Reset now</button><button id="btResetCancel">Cancel</button></div>
+      </div>
+      <p id="btRules" class="muted" style="margin:0 0 10px" hidden></p>
       <div id="btBody"><div class="empty">No backtest yet. Log in to Kite, then press <b>Run backtest</b>.</div></div>
     </div>
 
@@ -242,7 +249,9 @@ async function refresh(){try{S=await (await fetch('/api/state',{cache:'no-store'
 }catch(e){$('#banners').innerHTML='<div class="banner bad">Cannot reach the engine. Is it still running?</div>'}}
 
 // Backtest
-function renderBTStatus(){const b=S.backtest||{};$('#btRun').disabled=!!b.running;$('#btStatus').textContent=b.running?('Running: '+b.progress):(b.finished&&!b.error?'Finished '+ftime(b.finished):'');
+function renderBTStatus(){const b=S.backtest||{};$('#btRun').disabled=!!b.running;$('#btResetBtn').disabled=!!b.running;
+ const fin=b.finished&&!String(b.finished).startsWith('0001');
+ if(b.running)$('#btStatus').textContent='Running: '+b.progress;else if(b.error)$('#btStatus').textContent=b.error;else if(fin)$('#btStatus').textContent='Finished '+ftime(b.finished);
  if(b.running)window._btWasRunning=true; else if(window._btWasRunning){window._btWasRunning=false;loadBacktest()}}
 $('#btRun').onclick=async()=>{const r=await api('/api/backtest',{method:'POST',body:JSON.stringify({years:+$('#btYears').value})});if(!r.ok){const j=await r.json();$('#btStatus').textContent=j.error}refresh()};
 function eqSVG(eq,start){if(!eq||eq.length<2)return'';const W=900,H=260,pad=40;let lo=Infinity,hi=-Infinity;
@@ -254,7 +263,21 @@ function eqSVG(eq,start){if(!eq||eq.length<2)return'';const W=900,H=260,pad=40;l
  <text x="2" y="14" class="ax">₹${fmt(hi)}</text><text x="2" y="${H-22}" class="ax">₹${fmt(lo)}</text>
  <text x="${pad}" y="${H-4}" class="ax">${fdate(eq[0].date)} ${pd(eq[0].date).getFullYear()}</text><text x="${W-8}" y="${H-4}" class="ax" text-anchor="end">${fdate(eq[eq.length-1].date)} ${pd(eq[eq.length-1].date).getFullYear()}</text>
  <path d="${path('benchmark')}" class="bm"/><path d="${path('equity')}" class="eq"/></svg>`}
-async function loadBacktest(){const j=await (await fetch('/api/backtest',{cache:'no-store'})).json();if(!j.result)return;const r=j.result,s=r.summary;$('#btReport').hidden=false;
+const BT_EMPTY='<div class="empty">No backtest yet. Log in to Kite, then press <b>Run backtest</b>.</div>';
+$('#btResetBtn').onclick=()=>{$('#btReset').hidden=false;$('#btClearCandles').checked=false};
+$('#btResetCancel').onclick=()=>{$('#btReset').hidden=true};
+$('#btResetGo').onclick=async()=>{$('#btResetGo').disabled=true;
+ try{const r=await api('/api/backtest/reset',{method:'POST',body:JSON.stringify({clear_candles:$('#btClearCandles').checked})});const j=await r.json();
+  if(!r.ok){$('#btStatus').textContent='Reset failed: '+(j.error||r.status);return}
+  $('#btReset').hidden=true;$('#btStatus').textContent=$('#btClearCandles').checked?'Reset — result and candles deleted.':'Reset — result deleted.';await loadBacktest();refresh()}
+ finally{$('#btResetGo').disabled=false}};
+async function loadBacktest(){const j=await (await fetch('/api/backtest',{cache:'no-store'})).json();
+ const cur=j.current||{};
+ if(!j.result){$('#btReport').hidden=true;$('#btBody').innerHTML=BT_EMPTY;$('#btRules').hidden=!cur.rules;$('#btRules').innerHTML=cur.rules?'Next run will use: '+esc(cur.rules):'';return}
+ const r=j.result,s=r.summary;$('#btReport').hidden=false;
+ const stale=!r.rules_hash||r.rules_hash!==cur.rules_hash;
+ $('#btRules').hidden=false;
+ $('#btRules').innerHTML=(stale?`<span class="chip warn">Out of date</span> This result was made with ${r.rules?'different rules: '+esc(r.rules):'an older version of the engine'}. The engine now uses: <b>${esc(cur.rules||'')}</b>. Press <b>Run backtest</b> to refresh it.`:'Rules: '+esc(r.rules));
  const k=[['Total return',num(s.total_return_pct,1)+'%',sgn(s.total_return_pct)],['CAGR',num(s.cagr_pct,1)+'%',sgn(s.cagr_pct)],['NIFTY CAGR',num(s.benchmark_cagr_pct,1)+'%',''],
   ['Max drawdown','−'+num(s.max_drawdown_pct,1)+'%','neg'],['Trades',s.trades,''],['Win rate',num(s.win_rate_pct,1)+'%',''],['Avg win / loss',num(s.avg_win_pct,1)+'% / '+num(s.avg_loss_pct,1)+'%',''],
   ['Profit factor',num(s.profit_factor),''],['Expectancy',num(s.expectancy_r)+' R',sgn(s.expectancy_r)],['Avg days held',num(s.avg_days_held,1),''],['Time in market',num(s.exposure_pct,0)+'%',''],['Charges paid',inr(s.total_costs),'']];

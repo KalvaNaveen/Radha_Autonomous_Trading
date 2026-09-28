@@ -74,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	}))
 	mux.HandleFunc("POST /api/backtest", s.guard(s.postBacktest))
 	mux.HandleFunc("GET /api/backtest", s.getBacktest)
+	mux.HandleFunc("POST /api/backtest/reset", s.guard(s.resetBacktest))
 	mux.HandleFunc("GET /backtest/report", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, s.eng.ReportPath())
 	})
@@ -319,16 +320,30 @@ func (s *Server) postBacktest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+func (s *Server) resetBacktest(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ClearCandles bool `json:"clear_candles"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in)
+	if err := s.eng.ResetBacktest(in.ClearCandles); err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 func (s *Server) getBacktest(w http.ResponseWriter, r *http.Request) {
+	rules, hash := s.eng.RulesNow()
+	cur, _ := json.Marshal(map[string]string{"rules": rules, "rules_hash": hash})
 	raw, err := s.eng.LatestBacktest()
 	if err != nil {
-		writeJSON(w, map[string]any{"status": s.eng.BacktestState()})
+		writeJSON(w, map[string]any{"status": s.eng.BacktestState(), "current": json.RawMessage(cur)})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	st, _ := json.Marshal(s.eng.BacktestState())
-	_, _ = w.Write([]byte(`{"status":` + string(st) + `,"result":`))
+	_, _ = w.Write([]byte(`{"status":` + string(st) + `,"current":` + string(cur) + `,"result":`))
 	_, _ = w.Write(raw)
 	_, _ = w.Write([]byte("}"))
 }

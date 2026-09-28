@@ -182,7 +182,7 @@ func TestHeikinAshiExit(t *testing.T) {
 }
 
 func TestEMACrossSupertrendEntryAndExit(t *testing.T) {
-	c := config.Defaults() // ema_cross is the default rule set
+	c := config.Defaults()      // ema_cross is the default rule set
 	c.Strategy.BreakevenAtR = 0 // test the pure fixed stop
 	st := NewStrategy(c.Strategy, c.Costs)
 	cl := uptrend(80, 600, -2)                     // falling: EMA10 < EMA20, Supertrend red
