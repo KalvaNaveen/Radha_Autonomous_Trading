@@ -206,32 +206,80 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getUniverse(w http.ResponseWriter, r *http.Request) {
-	raw, _ := os.ReadFile(s.eng.Config().Paths.UniverseFile)
-	writeJSON(w, map[string]any{"content": string(raw)})
+	path := s.eng.Config().Paths.UniverseFile
+	raw, _ := os.ReadFile(path)
+	syms, warns, err := data.ParseUniverse(strings.NewReader(string(raw)))
+	out := map[string]any{"content": string(raw), "file": path, "symbols": syms, "warnings": warns,
+		"max": data.MaxUniverse, "unknown": s.unknownSymbols(syms)}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	writeJSON(w, out)
 }
 
+// unknownSymbols lists symbols missing from the cached NSE instrument master
+// (empty when no master has been downloaded yet, i.e. before the first login).
+func (s *Server) unknownSymbols(syms []string) []string {
+	ins := s.eng.Data().LatestInstruments()
+	if len(ins) == 0 {
+		return []string{}
+	}
+	eq := map[string]bool{}
+	for _, in := range ins {
+		if in.Segment == "NSE" && in.InstrumentType == "EQ" {
+			eq[in.TradingSymbol] = true
+		}
+	}
+	out := []string{}
+	for _, v := range syms {
+		if !eq[v] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// putUniverse accepts either {"symbols":[...]} JSON or raw text in any
+// pasted format, and always stores the canonical one-symbol-per-line file.
 func (s *Server) putUniverse(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 256<<10))
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	text := strings.ReplaceAll(string(body), "\r\n", "\n")
+	text := string(body)
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var in struct {
+			Symbols []string `json:"symbols"`
+		}
+		if err := json.Unmarshal(body, &in); err != nil {
+			writeErr(w, 400, "bad JSON: "+err.Error())
+			return
+		}
+		text = strings.Join(in.Symbols, "\n")
+	}
 	syms, warns, err := data.ParseUniverse(strings.NewReader(text))
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if ins := s.eng.Data().LatestInstruments(); len(ins) > 0 {
-		_, rw := data.Resolve(syms, ins)
-		warns = append(warns, rw...)
+	unknown := s.unknownSymbols(syms)
+	for _, u := range unknown {
+		warns = append(warns, u+": not found on NSE — it will be skipped by the scan")
 	}
-	if err := os.WriteFile(s.eng.Config().Paths.UniverseFile, []byte(text), 0o644); err != nil {
-		writeErr(w, 500, err.Error())
+	path := s.eng.Config().Paths.UniverseFile
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(data.FormatUniverse(syms)), 0o644); err != nil {
+		writeErr(w, 500, "cannot write "+path+": "+err.Error())
 		return
 	}
-	s.log.Info("universe saved from UI", "symbols", len(syms))
-	writeJSON(w, map[string]any{"ok": true, "count": len(syms), "warnings": warns})
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		writeErr(w, 500, "cannot replace "+path+" (is it open in Excel?): "+err.Error())
+		return
+	}
+	s.log.Info("universe saved from UI", "symbols", len(syms), "unknown", len(unknown))
+	writeJSON(w, map[string]any{"ok": true, "count": len(syms), "symbols": syms, "warnings": warns, "unknown": unknown})
 }
 
 func (s *Server) postCredentials(w http.ResponseWriter, r *http.Request) {

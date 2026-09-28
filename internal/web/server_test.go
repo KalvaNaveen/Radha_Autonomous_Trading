@@ -62,6 +62,24 @@ func TestUniverseSave(t *testing.T) {
 	if c, b := put("INFY\r\nTCS\r\n"); c != 200 || !strings.Contains(b, `"count":2`) {
 		t.Fatalf("save: %d %s", c, b)
 	}
+	// A pasted watchlist on one line must keep every symbol.
+	if c, b := put("NSE:WIPRO,NSE:TCS,NSE:INFY"); c != 200 || !strings.Contains(b, `"count":3`) {
+		t.Fatalf("comma list: %d %s", c, b)
+	}
+	// The UI sends JSON.
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/universe", strings.NewReader(`{"symbols":["SBIN","M&M","sbin"]}`))
+	req.Header.Set("X-Kitealgo", "1")
+	req.Header.Set("Content-Type", "application/json")
+	res, _ := http.DefaultClient.Do(req)
+	b, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 200 || !strings.Contains(string(b), `"symbols":["SBIN","M\u0026M"]`) {
+		t.Fatalf("json save: %d %s", res.StatusCode, b)
+	}
+	res, _ = http.Get(ts.URL + "/api/universe")
+	b, _ = io.ReadAll(res.Body)
+	if !strings.Contains(string(b), `"symbols":["SBIN","M\u0026M"]`) || !strings.Contains(string(b), `SBIN\nM\u0026M\n`) {
+		t.Fatalf("get after save: %s", b)
+	}
 }
 
 // Zerodha redirects to the app's Redirect URL; a login landing on "/" (or any

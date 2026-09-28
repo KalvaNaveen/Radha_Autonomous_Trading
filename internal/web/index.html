@@ -21,7 +21,7 @@ header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px
 .chip.good{background:var(--good-bg);color:var(--good)}.chip.bad{background:var(--bad-bg);color:var(--bad)}.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.info{background:var(--info-bg);color:var(--accent)}
 main{max-width:1280px;margin:0 auto;padding:16px;display:grid;gap:16px}
 .grid2{display:grid;grid-template-columns:minmax(300px,370px) 1fr;gap:16px;align-items:start}@media (max-width:900px){.grid2{grid-template-columns:1fr}}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+.card{scroll-margin-top:64px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
 .card h2{margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted)}
 .banner{border-radius:10px;padding:10px 14px;font-weight:500;margin-bottom:8px}.banner.bad{background:var(--bad-bg);color:var(--bad)}.banner.good{background:var(--good-bg);color:var(--good)}.banner.warn{background:var(--warn-bg);color:var(--warn)}
 .steps{list-style:none;margin:0;padding:0;display:grid;gap:10px}
@@ -46,6 +46,13 @@ td.why{white-space:normal;min-width:260px;color:var(--muted);font-size:12px}
 .logs div{padding:2px 0;border-bottom:1px dashed var(--line);white-space:pre-wrap;word-break:break-word}.lv-WARN{color:var(--warn)}.lv-ERROR{color:var(--bad)}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.empty{padding:22px;text-align:center;color:var(--muted)}
 svg .eq{fill:none;stroke:var(--accent);stroke-width:2}svg .bm{fill:none;stroke:var(--bm);stroke-width:1.5;stroke-dasharray:4 3}svg .grid{stroke:var(--line)}svg .ax{fill:var(--muted);font-size:11px}
+.uhead{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}.uhead .cnt{font-weight:700}
+.uadd{display:flex;gap:8px;align-items:stretch;flex-wrap:wrap}.uadd input{flex:1;min-width:220px;font-family:var(--mono)}
+.syms{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);min-height:56px;max-height:360px;overflow:auto;align-content:flex-start}
+.sym{display:inline-flex;align-items:center;gap:2px;padding:2px 2px 2px 9px;border-radius:6px;background:var(--panel);border:1px solid var(--line);font:600 12px var(--mono)}
+.sym button{border:none;background:none;padding:0 6px;font-size:14px;line-height:18px;color:var(--muted);border-radius:4px}.sym button:hover{background:var(--bad-bg);color:var(--bad)}
+.sym.new{border-color:var(--accent);background:var(--info-bg)}.sym.unk{border-color:var(--bad);background:var(--bad-bg);color:var(--bad)}
+.dirty{color:var(--warn);font-weight:600}
 .legend span{display:inline-block;width:18px;height:3px;vertical-align:middle;margin:0 6px 0 12px}
 </style>
 </head>
@@ -126,9 +133,19 @@ svg .eq{fill:none;stroke:var(--accent);stroke-width:2}svg .bm{fill:none;stroke:v
     </div>
 
     <div data-p="un" hidden>
-      <textarea id="unText" spellcheck="false"></textarea>
-      <div class="row" style="margin-top:8px"><button class="primary" id="unSave">Save universe</button><span id="unMsg" class="muted"></span></div>
-      <p class="muted" style="margin-bottom:0">One NSE symbol per line (up to 300). The evening scan looks for setups in these stocks only; positions you already hold are always managed.</p>
+      <div class="uhead"><span class="cnt" id="unCount">…</span><span id="unDirty" class="dirty" hidden>● unsaved changes</span><div class="spacer"></div>
+        <input id="unFilter" placeholder="Filter…" style="width:180px" autocomplete="off"></div>
+      <div id="unAddMode" class="uadd">
+        <input id="unAdd" placeholder="Add stocks — e.g. WIPRO, TATAMOTORS or paste a whole watchlist" autocomplete="off" spellcheck="false">
+        <button id="unAddBtn">Add</button><button id="unReplaceBtn" title="Paste a complete list that replaces the current one">Replace whole list…</button>
+      </div>
+      <div id="unReplaceMode" hidden>
+        <textarea id="unText" spellcheck="false" placeholder="Paste the full list here — one per line, or comma / space separated. NSE:INFY and INFY-EQ are fine."></textarea>
+        <div class="row" style="margin-top:8px"><button id="unReplaceApply" class="primary">Use this list</button><button id="unReplaceCancel">Cancel</button></div>
+      </div>
+      <div class="syms" id="unSyms"></div>
+      <div class="row"><button class="primary" id="unSave" disabled>Save universe</button><button id="unDiscard" disabled>Discard changes</button><span id="unMsg" class="muted"></span></div>
+      <p class="muted" style="margin-bottom:0">The evening scan (15:50) looks for setups in these stocks only — up to <span id="unMax">300</span>. Changes saved after the scan are used from the next evening. Positions you already hold are always managed, even if you remove them here. Stored in <code id="unFile">universe.csv</code>.</p>
     </div>
 
     <div data-p="lg" hidden>
@@ -189,7 +206,7 @@ window.toggleCred=()=>{const c=$('#cred');c.hidden=!c.hidden;credForced=!c.hidde
 window.saveCred=async()=>{const r=await api('/api/credentials',{method:'POST',body:JSON.stringify({api_key:$('#ck').value,api_secret:$('#cs').value})});const j=await r.json();
  $('#cmsg').textContent=r.ok?'Saved.':j.error;if(r.ok){$('#ck').value='';$('#cs').value='';credForced=false;setTimeout(()=>{$('#cmsg').textContent=''},1500);refresh()}};
 window.retry=async()=>{await api('/api/retry',{method:'POST'});setTimeout(refresh,500)};
-window.openTab=t=>document.querySelector(`.tab[data-t="${t}"]`).click();
+window.openTab=t=>{const b=document.querySelector(`.tab[data-t="${t}"]`);b.click();b.closest('.card').scrollIntoView({behavior:'smooth',block:'start'});if(t==='un')setTimeout(()=>$('#unAdd').focus({preventScroll:true}),400)};
 
 function renderHeader(){
  const m=$('#mode');m.textContent=S.mode.toUpperCase()+(S.setup.dev_mock?' · SIMULATOR':'');m.className='chip '+(S.mode==='live'?'bad':'info');
@@ -256,9 +273,42 @@ async function loadJournal(){const j=await (await fetch('/api/journal',{cache:'n
  <td class="num ${sgn(t.net)}"><b>${num(t.net)}</b></td><td class="num ${sgn(t.r)}">${num(t.r)}</td><td class="num">${t.bars_held}</td><td>${esc(STAGE_TXT[t.stage]||t.stage)}</td><td class="why">${esc(t.reason)}</td></tr>`).join('')||`<tr><td colspan="12" class="empty">No closed trades yet.</td></tr>`}
 
 // Universe
-async function loadUniverse(){const j=await (await fetch('/api/universe',{cache:'no-store'})).json();$('#unText').value=j.content||'';unLoaded=true}
-$('#unSave').onclick=async()=>{const r=await api('/api/universe',{method:'PUT',headers:{'Content-Type':'text/csv'},body:$('#unText').value});const j=await r.json();
- $('#unMsg').innerHTML=r.ok?`<span style="color:var(--good)">Saved ${j.count} stocks.</span> `+(j.warnings||[]).map(esc).join(' · '):`<span style="color:var(--bad)">${esc(j.error)}</span>`;refresh()};
+let U={saved:[],cur:[],unknown:new Set(),max:300};
+const parseSyms=t=>{const out=[];for(let ln of t.split(/\r?\n/)){ln=ln.replace(/#.*/,'');const tk=ln.split(/[,;\t |"']+/).filter(Boolean);
+ if(tk.length&&/^(symbols?|tradingsymbol|instrument|stock|scrip|ticker)$/i.test(tk[0]))continue;
+ for(let x of tk){x=x.toUpperCase();if(x.includes(':')){if(!x.startsWith('NSE:'))continue;x=x.slice(4)}x=x.replace(/-EQ$/,'');
+  if(!x||/^[0-9.]+$/.test(x)||/^(NSE|EQ)$/.test(x)||!/^[A-Z0-9&_-]+$/.test(x))continue;out.push(x)}}return out};
+const unDirty=()=>U.cur.join()!==U.saved.join();
+function renderUniverse(){const f=$('#unFilter').value.trim().toUpperCase(),sv=new Set(U.saved);
+ const list=U.cur.filter(x=>!f||x.includes(f));
+ $('#unSyms').innerHTML=list.map(x=>`<span class="sym${U.unknown.has(x)?' unk':!sv.has(x)?' new':''}" title="${U.unknown.has(x)?'Not found on NSE — the scan will skip it':''}">${esc(x)}<button data-rm="${esc(x)}" aria-label="Remove ${esc(x)}">×</button></span>`).join('')
+  ||`<span class="muted">${U.cur.length?'No match for the filter.':'No stocks yet — add some above.'}</span>`;
+ const d=unDirty();$('#unCount').textContent=`${U.cur.length} / ${U.max} stocks`;$('#unDirty').hidden=!d;$('#unSave').disabled=!d||!U.cur.length;$('#unDiscard').disabled=!d}
+async function loadUniverse(){const j=await (await fetch('/api/universe',{cache:'no-store'})).json();
+ U.saved=j.symbols||[];U.cur=[...U.saved];U.unknown=new Set(j.unknown||[]);U.max=j.max||300;$('#unMax').textContent=U.max;$('#unFile').textContent=j.file||'universe.csv';
+ $('#unMsg').innerHTML=j.error?`<span style="color:var(--bad)">${esc(j.error)}</span>`:(j.unknown||[]).length?`<span style="color:var(--bad)">${j.unknown.length} not found on NSE (red).</span>`:'';
+ unLoaded=true;renderUniverse()}
+function addSyms(text){const add=parseSyms(text),have=new Set(U.cur);let n=0,dup=0,over=0;
+ for(const x of add){if(have.has(x)){dup++;continue}if(U.cur.length>=U.max){over++;continue}U.cur.push(x);have.add(x);n++}
+ $('#unMsg').innerHTML=add.length?`Added ${n}${dup?`, ${dup} already in the list`:''}${over?`, <span style="color:var(--bad)">${over} over the ${U.max} limit</span>`:''}. Click <b>Save universe</b> to keep it.`:'<span style="color:var(--bad)">No valid NSE symbols found in that text.</span>';
+ renderUniverse();return add.length}
+$('#unAdd').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();if(addSyms(e.target.value))e.target.value=''}});
+$('#unAdd').addEventListener('paste',e=>{const t=(e.clipboardData||window.clipboardData).getData('text');if(/[\n,;\t]/.test(t.trim())){e.preventDefault();addSyms(t)}});
+$('#unAddBtn').onclick=()=>{const i=$('#unAdd');if(addSyms(i.value))i.value='';i.focus()};
+$('#unSyms').onclick=e=>{const b=e.target.closest('button[data-rm]');if(!b)return;U.cur=U.cur.filter(x=>x!==b.dataset.rm);$('#unMsg').textContent='';renderUniverse()};
+$('#unFilter').oninput=renderUniverse;
+$('#unReplaceBtn').onclick=()=>{$('#unAddMode').hidden=true;$('#unReplaceMode').hidden=false;$('#unText').value=U.cur.join('\n');$('#unText').focus();$('#unText').select()};
+$('#unReplaceCancel').onclick=()=>{$('#unAddMode').hidden=false;$('#unReplaceMode').hidden=true};
+$('#unReplaceApply').onclick=()=>{const l=[...new Set(parseSyms($('#unText').value))];if(!l.length){$('#unMsg').innerHTML='<span style="color:var(--bad)">No valid NSE symbols found.</span>';return}
+ U.cur=l.slice(0,U.max);$('#unMsg').innerHTML=`List replaced with ${U.cur.length} stocks${l.length>U.max?` (first ${U.max} kept)`:''}. Click <b>Save universe</b> to keep it.`;$('#unReplaceCancel').onclick();renderUniverse()};
+$('#unDiscard').onclick=()=>{U.cur=[...U.saved];$('#unMsg').textContent='Changes discarded.';renderUniverse()};
+$('#unSave').onclick=async()=>{$('#unSave').disabled=true;$('#unMsg').textContent='Saving…';
+ try{const r=await api('/api/universe',{method:'PUT',body:JSON.stringify({symbols:U.cur})});const j=await r.json();
+  if(!r.ok){$('#unMsg').innerHTML=`<span style="color:var(--bad)">Not saved: ${esc(j.error||r.status)}</span>`;renderUniverse();return}
+  U.saved=j.symbols||U.cur;U.cur=[...U.saved];U.unknown=new Set(j.unknown||[]);
+  $('#unMsg').innerHTML=`<span style="color:var(--good)">Saved ${j.count} stocks.</span> `+((j.unknown||[]).length?`<span style="color:var(--bad)">${j.unknown.length} not found on NSE (red) — fix or remove them.</span>`:'');
+  renderUniverse();refresh()}catch(e){$('#unMsg').innerHTML='<span style="color:var(--bad)">Cannot reach the engine — not saved.</span>';renderUniverse()}};
+window.addEventListener('beforeunload',e=>{if(unLoaded&&unDirty()){e.preventDefault();e.returnValue=''}});
 
 // Logs
 let lastSeq=0;async function pollLogs(){try{const lines=await (await fetch('/api/logs?after='+lastSeq,{cache:'no-store'})).json();if(!lines.length)return;const box=$('#logs');const bottom=box.scrollTop+box.clientHeight>=box.scrollHeight-20;
