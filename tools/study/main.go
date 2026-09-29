@@ -39,6 +39,8 @@ func main() {
 	capital := flag.Float64("capital", 0, "starting capital (0: backtest.capital from the config)")
 	outDir := flag.String("out", "", "holdings grid: write the full report of the -detail variant here")
 	csvOut := flag.String("csv", "", "full grid: write every combination's results to this CSV file")
+	autoN := flag.Int("auto", 0, "auto universe: scan only the N strongest stocks each month (0 = off)")
+	autoLook := flag.Int("auto-lookback", 120, "auto universe: strength window in sessions")
 	flag.Parse()
 
 	cfg := config.Defaults()
@@ -50,6 +52,9 @@ func main() {
 	}
 	if *capital > 0 {
 		cfg.Backtest.Capital = *capital
+	}
+	if *autoN > 0 { // rule-based stock list: each month the N strongest of every cached stock
+		cfg.Backtest.AutoUniverse = config.AutoUniverseConfig{Enabled: true, Source: "all_nse", TopN: *autoN, LookbackDays: *autoLook}
 	}
 	if *grid == "holdings" || *grid == "full" || *grid == "edge" { // the backtester's capital (the other grids keep risk.capital for comparability)
 		cfg = cfg.ForBacktest()

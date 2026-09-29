@@ -202,8 +202,21 @@ type MarketConfig struct {
 
 // BacktestConfig holds defaults for the backtester.
 type BacktestConfig struct {
-	Years   int     `yaml:"years"`
-	Capital float64 `yaml:"capital"` // ₹ starting capital for backtests (0 = risk.capital)
+	Years        int                `yaml:"years"`
+	Capital      float64            `yaml:"capital"` // ₹ starting capital for backtests (0 = risk.capital)
+	AutoUniverse AutoUniverseConfig `yaml:"auto_universe"`
+}
+
+// AutoUniverseConfig picks the stocks to scan by rule instead of by hand, so
+// the backtest has no hindsight in its stock list: on the first session of
+// every month, the TopN strongest stocks (return over LookbackDays sessions)
+// among those passing min_price and min_turnover_cr on that date.
+type AutoUniverseConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	Source       string `yaml:"source"`        // all_nse (every NSE share) | file (a broad list, e.g. NIFTY 500 CSV)
+	File         string `yaml:"file"`          // for source: file
+	TopN         int    `yaml:"top_n"`         // stocks scanned each month
+	LookbackDays int    `yaml:"lookback_days"` // strength window, sessions
 }
 
 // HoldingsConfig is the "hold N stocks" portfolio mode — backtest only for
@@ -286,7 +299,8 @@ func Defaults() Config {
 			RetryBackoff: 200 * time.Millisecond, EmergencyRetries: 3, MarketProtection: -1,
 			EntryLimitBufferPct: 0.5, GTTLimitBufferPct: 1.0, FillTimeout: 20 * time.Second, EntryMaxAge: 2 * time.Minute},
 		Market:   MarketConfig{Index: "NIFTY 50", RegimeFilter: true},
-		Backtest: BacktestConfig{Years: 5, Capital: 500000},
+		Backtest: BacktestConfig{Years: 5, Capital: 500000,
+			AutoUniverse: AutoUniverseConfig{Source: "all_nse", File: "nifty500.csv", TopN: 50, LookbackDays: 120}},
 		Holdings: HoldingsConfig{Enabled: false, Slots: 5, MarketCheck: "off", MarketHAGreen: true,
 			MidcapIndex: "NIFTY MIDCAP 150", SmallcapIndex: "NIFTY SMLCAP 250", CapsFile: "caps.csv"},
 		Server:   ServerConfig{Listen: "127.0.0.1:8080", PublicURL: "http://127.0.0.1:8080"},
@@ -397,6 +411,14 @@ func (c Config) Validate() error {
 	}
 	if c.Backtest.Capital < 0 {
 		add("backtest.capital must be >= 0")
+	}
+	if a := c.Backtest.AutoUniverse; a.Enabled {
+		if !oneOf(a.Source, "all_nse", "file") {
+			add("backtest.auto_universe.source must be all_nse or file, got %q", a.Source)
+		}
+		if a.TopN < 5 || a.TopN > 500 || a.LookbackDays < 20 || a.LookbackDays > 500 {
+			add("backtest.auto_universe: top_n 5..500 and lookback_days 20..500")
+		}
 	}
 	r := c.Risk
 	if r.Capital <= 0 || r.RiskPerTradePct <= 0 || r.RiskPerTradePct > 5 || r.MaxPositions < 1 || r.MaxPositionPct <= 0 || r.MaxPositionPct > 100 {

@@ -29,6 +29,39 @@ func TestParseUniverse(t *testing.T) {
 	}
 }
 
+// NSE index downloads: only the Symbol column counts; no 300-symbol cap.
+func TestLoadListNSECSV(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "nifty500.csv")
+	var b strings.Builder
+	b.WriteString("Company Name,Industry,Symbol,Series,ISIN Code\n")
+	for i := 0; i < 400; i++ {
+		b.WriteString("Some Co Ltd.,Capital Goods,SYM" + string(rune('A'+i%26)) + string(rune('A'+i/26)) + ",EQ,INE000A01010\n")
+	}
+	_ = os.WriteFile(p, []byte(b.String()), 0o644)
+	syms, _, err := LoadList(p)
+	if err != nil || len(syms) != 400 || syms[0] != "SYMAA" {
+		t.Fatalf("%d symbols, first %v, err %v", len(syms), syms[:1], err)
+	}
+}
+
+func TestAllEquities(t *testing.T) {
+	ins := []broker.Instrument{
+		{TradingSymbol: "INFY", Name: "INFOSYS", Segment: "NSE", InstrumentType: "EQ"},
+		{TradingSymbol: "GOLDIAM", Name: "GOLDIAM INTERNATIONAL", Segment: "NSE", InstrumentType: "EQ"},
+		{TradingSymbol: "NIFTYBEES", Name: "NIP IND ETF NIFTY BEES", Segment: "NSE", InstrumentType: "EQ"},
+		{TradingSymbol: "SGBMAR29", Name: "SGB 2021-22 SR-X", Segment: "NSE", InstrumentType: "EQ"},
+		{TradingSymbol: "ABC-BE", Name: "ABC", Segment: "NSE", InstrumentType: "EQ"},
+		{TradingSymbol: "NIFTY 50", Name: "NIFTY 50", Segment: "INDICES", InstrumentType: "EQ"},
+	}
+	var got []string
+	for _, x := range AllEquities(ins) {
+		got = append(got, x.TradingSymbol)
+	}
+	if strings.Join(got, ",") != "INFY,GOLDIAM" {
+		t.Fatalf("got %v", got)
+	}
+}
+
 func TestLoadCaps(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "caps.csv")
 	_ = os.WriteFile(p, []byte("symbol,cap\nKEI,mid\nnse:rba,Small\nX,huge\n"), 0o644)

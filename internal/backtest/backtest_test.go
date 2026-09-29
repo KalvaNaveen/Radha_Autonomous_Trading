@@ -139,6 +139,50 @@ func TestHoldingsMode(t *testing.T) {
 	}
 }
 
+// Auto universe: each month only the top-N by strength (point in time) are
+// scanned, and every trade is in a stock that was in that month's pool.
+func TestAutoUniverse(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Holdings.Enabled, cfg.Strategy.EntryMode = true, "both"
+	cfg.Backtest.AutoUniverse = config.AutoUniverseConfig{Enabled: true, Source: "all_nse", TopN: 4, LookbackDays: 60}
+	var ins []Instrument
+	for i := 0; i < 16; i++ {
+		ins = append(ins, Instrument{Symbol: string(rune('A' + i)), Token: uint32(i + 1),
+			Bars: synth(int64(i+11), 900, 300+20*float64(i), 0.0002*float64(i%5), 0.018)})
+	}
+	idx := synth(99, 900, 15000, 0.0004, 0.009)
+	res := Run(Input{Instruments: ins, Index: idx, From: idx[120].Date, To: idx[len(idx)-1].Date, Config: cfg})
+	if len(res.Pools) < 30 || res.Summary.Trades == 0 {
+		t.Fatalf("pools %d trades %d", len(res.Pools), res.Summary.Trades)
+	}
+	inPool := func(sym string, d time.Time) bool {
+		var cur []string
+		for _, p := range res.Pools {
+			if p.Date.After(d) {
+				break
+			}
+			cur = p.Symbols
+		}
+		for _, s := range cur {
+			if s == sym {
+				return true
+			}
+		}
+		return false
+	}
+	for _, p := range res.Pools {
+		if len(p.Symbols) > 4 {
+			t.Fatalf("pool larger than top_n: %v", p.Symbols)
+		}
+	}
+	for _, tr := range res.Trades {
+		// The signal formed the evening before the entry, on a pool day.
+		if !inPool(tr.Symbol, tr.EntryDate.AddDate(0, 0, -1)) && !inPool(tr.Symbol, tr.EntryDate.AddDate(0, 0, -3)) {
+			t.Fatalf("%s bought on %s but not in that month's pool", tr.Symbol, tr.EntryDate.Format("2006-01-02"))
+		}
+	}
+}
+
 // A position that gaps below its stop must be sold at the open, not the stop.
 func TestGapThroughStopFillsAtOpen(t *testing.T) {
 	cfg := config.Defaults()

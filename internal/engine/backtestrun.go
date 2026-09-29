@@ -80,6 +80,10 @@ type BacktestSettings struct {
 	MarketHAGreen  bool    `json:"market_ha_green"`   // the index's Heikin-Ashi candle must be green
 	ResearchAllow  string  `json:"research_allow"`    // all | comma list of research tags
 	ResearchRank   string  `json:"research_rank"`     // rs | research
+	UniverseMode   string  `json:"universe_mode"`     // list (universe.csv) | all_nse | file — auto picks the strongest each month
+	UniverseFile   string  `json:"universe_file"`     // for file: a broad list such as the NIFTY 500 CSV
+	TopN           int     `json:"top_n"`             // auto: stocks scanned each month
+	LookbackDays   int     `json:"lookback_days"`     // auto: strength window
 }
 
 func (e *Engine) btSettingsPath() string {
@@ -89,10 +93,15 @@ func (e *Engine) btSettingsPath() string {
 // DefaultBacktestSettings mirrors config.yaml.
 func (e *Engine) DefaultBacktestSettings() BacktestSettings {
 	c := e.cfg.ForBacktest()
-	return BacktestSettings{Capital: c.Risk.Capital, Holdings: c.Holdings.Enabled, Slots: c.SlotCount(),
+	s := BacktestSettings{Capital: c.Risk.Capital, Holdings: c.Holdings.Enabled, Slots: c.SlotCount(),
 		EntryMode: orDefault(c.Strategy.EntryMode, "cross"), TrendMaxDays: c.Strategy.TrendMaxDays, TrendMaxExtPct: c.Strategy.TrendMaxExtPct,
 		MarketCheck: orDefault(c.Holdings.MarketCheck, "off"), MarketHAGreen: c.Holdings.MarketHAGreen,
-		ResearchAllow: orDefault(c.Strategy.ResearchAllow, "all"), ResearchRank: orDefault(c.Strategy.ResearchRank, "rs")}
+		ResearchAllow: orDefault(c.Strategy.ResearchAllow, "all"), ResearchRank: orDefault(c.Strategy.ResearchRank, "rs"),
+		UniverseMode: "list", UniverseFile: c.Backtest.AutoUniverse.File, TopN: c.Backtest.AutoUniverse.TopN, LookbackDays: c.Backtest.AutoUniverse.LookbackDays}
+	if c.Backtest.AutoUniverse.Enabled {
+		s.UniverseMode = c.Backtest.AutoUniverse.Source
+	}
+	return s
 }
 
 func orDefault(v, d string) string {
@@ -133,6 +142,11 @@ func (e *Engine) backtestConfig(s BacktestSettings) (config.Config, error) {
 	c.Holdings.Enabled, c.Holdings.Slots, c.Holdings.MarketCheck, c.Holdings.MarketHAGreen = s.Holdings, s.Slots, s.MarketCheck, s.MarketHAGreen
 	c.Strategy.EntryMode, c.Strategy.TrendMaxDays, c.Strategy.TrendMaxExtPct = s.EntryMode, s.TrendMaxDays, s.TrendMaxExtPct
 	c.Strategy.ResearchAllow, c.Strategy.ResearchRank = orDefault(s.ResearchAllow, "all"), orDefault(s.ResearchRank, "rs")
+	a := &c.Backtest.AutoUniverse
+	a.Enabled = s.UniverseMode == "all_nse" || s.UniverseMode == "file"
+	if a.Enabled {
+		a.Source, a.File, a.TopN, a.LookbackDays = s.UniverseMode, orDefault(s.UniverseFile, a.File), s.TopN, s.LookbackDays
+	}
 	if err := c.Validate(); err != nil {
 		return c, err
 	}
@@ -195,12 +209,16 @@ func (e *Engine) StartBacktest(years int) error {
 }
 
 func (e *Engine) runBacktest(years int, access string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
 	cfg, err := e.backtestConfig(e.BacktestSettingsNow())
 	if err != nil {
 		return fmt.Errorf("backtest settings: %w", err)
 	}
+	limit := 30 * time.Minute
+	if cfg.Backtest.AutoUniverse.Enabled {
+		limit = 3 * time.Hour // the first download of every NSE share takes ~25 minutes
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
 	kite := broker.NewKite(e.auth.APIKey(), access, e.httpc, e.cfg.Orders.MarketProtection, e.cfg.Dev.APIRoot)
 	ds := data.NewStore(e.cfg.Paths.DataDir, kite, e.log)
 	syms, _, err := data.LoadUniverse(e.cfg.Paths.UniverseFile)
@@ -213,6 +231,18 @@ func (e *Engine) runBacktest(years int, access string) error {
 		return fmt.Errorf("instruments: %w", err)
 	}
 	ins, _ := data.Resolve(syms, nse)
+	if a := cfg.Backtest.AutoUniverse; a.Enabled { // rule-based stock list: download the whole pool
+		if a.Source == "file" {
+			list, _, err := data.LoadList(a.File)
+			if err != nil {
+				return fmt.Errorf("auto universe list: %w", err)
+			}
+			ins, _ = data.Resolve(list, nse)
+		} else {
+			ins = data.AllEquities(nse)
+		}
+		e.log.Info("auto universe", "source", a.Source, "stocks", len(ins))
+	}
 	idxIn, ok := data.FindIndex(nse, e.cfg.Market.Index)
 	if !ok {
 		return fmt.Errorf("index %q not found", e.cfg.Market.Index)
@@ -263,6 +293,9 @@ func (e *Engine) runBacktest(years int, access string) error {
 			b.Progress = fmt.Sprintf("downloading %s (%d/%d)", in.TradingSymbol, n+1, len(ins))
 		})
 		bars, err := ds.Daily(ctx, in.InstrumentToken, loadFrom, to)
+		if ctx.Err() != nil {
+			return fmt.Errorf("download stopped after %d of %d stocks: %w (downloaded candles are cached — run again to continue)", n, len(ins), ctx.Err())
+		}
 		if err != nil {
 			e.log.Warn("history unavailable", "symbol", in.TradingSymbol, "err", err)
 			continue

@@ -91,6 +91,61 @@ type Summary struct {
 	ByResearch        []Group `json:"by_research"`      // results per research tag at entry
 }
 
+// Pool is the auto universe chosen on one date (strongest first).
+type Pool struct {
+	Date     time.Time `json:"date"`
+	Eligible int       `json:"eligible"` // stocks passing price and liquidity that day
+	Symbols  []string  `json:"symbols"`
+}
+
+// pickPool ranks every stock with a bar on d that passes min_price and
+// min_turnover_cr by its return over lookback sessions, using only data up
+// to d, and keeps the top n.
+func pickPool(insts []*inst, d time.Time, p config.StrategyConfig, n, lookback int) Pool {
+	type cand struct {
+		sym string
+		ret float64
+	}
+	var cs []cand
+	for _, x := range insts {
+		i, ok := x.s.IndexOn(d)
+		if !ok || i < lookback || x.s.Close[i-lookback] <= 0 {
+			continue
+		}
+		c := x.s.Close[i]
+		if c < p.MinPrice || c*x.s.VolAvg[i] < p.MinTurnoverCr*1e7 {
+			continue
+		}
+		cs = append(cs, cand{x.Symbol, c/x.s.Close[i-lookback] - 1})
+	}
+	sort.Slice(cs, func(a, b int) bool { return cs[a].ret > cs[b].ret })
+	pl := Pool{Date: d, Eligible: len(cs)}
+	for k := 0; k < n && k < len(cs); k++ {
+		pl.Symbols = append(pl.Symbols, cs[k].sym)
+	}
+	return pl
+}
+
+// everLiquid reports whether the stock ever passes min_price and the
+// average-turnover filter (volume_avg_period sessions) from `from` onwards.
+func everLiquid(bars []models.Bar, p config.StrategyConfig, from time.Time) bool {
+	n := p.VolumeAvgPeriod
+	if n < 1 {
+		n = 20
+	}
+	var vol float64
+	for i, b := range bars {
+		vol += b.Volume
+		if i >= n {
+			vol -= bars[i-n].Volume
+		}
+		if i >= n-1 && !b.Date.Before(from) && b.Close >= p.MinPrice && b.Close*vol/float64(n) >= p.MinTurnoverCr*1e7 {
+			return true
+		}
+	}
+	return false
+}
+
 // Group is the trade statistics of one research tag.
 type Group struct {
 	Key    string  `json:"key"`
@@ -118,6 +173,7 @@ type Result struct {
 	Config   config.Config  `json:"-"`
 	Skipped  map[string]int `json:"skipped_reasons"`
 	Notes    []string       `json:"notes,omitempty"`
+	Pools    []Pool         `json:"pools,omitempty"` // auto universe: the stocks scanned each month
 	MTFCosts float64        `json:"mtf_costs"`  // interest + MTF brokerage + pledge fees
 	Rules    string         `json:"rules"`      // human summary of the rules used
 	RulesID  string         `json:"rules_hash"` // RulesHash of the config used
@@ -133,7 +189,8 @@ func RulesHash(c config.Config) string {
 		M config.MarketConfig
 		F config.MTFConfig
 		H config.HoldingsConfig
-	}{c.Strategy, c.Risk, c.Costs, c.Market, c.MTF, c.Holdings})
+		A config.AutoUniverseConfig
+	}{c.Strategy, c.Risk, c.Costs, c.Market, c.MTF, c.Holdings, c.Backtest.AutoUniverse})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:8])
 }
@@ -202,6 +259,13 @@ func DescribeRules(c config.Config) string {
 	if len(exits) > 0 {
 		parts = append(parts, "exit "+strings.Join(exits, ", "))
 	}
+	if a := c.Backtest.AutoUniverse; a.Enabled {
+		src := "all NSE shares"
+		if a.Source == "file" {
+			src = a.File
+		}
+		parts = append(parts, fmt.Sprintf("stocks: each month the %d strongest (%d-day return) from %s", a.TopN, a.LookbackDays, src))
+	}
 	if s.ResearchAllow != "" && !strings.EqualFold(s.ResearchAllow, "all") {
 		parts = append(parts, "research only "+s.ResearchAllow)
 	}
@@ -247,6 +311,9 @@ func Run(in Input) Result {
 		if len(ins.Bars) == 0 {
 			continue
 		}
+		if cfg.Backtest.AutoUniverse.Enabled && !everLiquid(ins.Bars, cfg.Strategy, in.From) {
+			continue // never tradable in the window: skip the indicator work (thousands of small caps)
+		}
 		insts = append(insts, &inst{Instrument: ins, s: swing.NewSeries(ins.Bars, cfg.Strategy)})
 	}
 
@@ -284,6 +351,10 @@ func Run(in Input) Result {
 		}
 		return st.RegimeOK(ser, j) && (!cfg.Holdings.MarketHAGreen || ser.HAGreen(j))
 	}
+
+	auto := cfg.Backtest.AutoUniverse
+	var pool map[string]bool // nil: scan every instrument
+	poolMonth := -1
 
 	cash := cfg.Risk.Capital
 	peak := cash
@@ -528,9 +599,20 @@ func Run(in Input) Result {
 				res.Skipped["drawdown pauses"]++
 			}
 		}
+		if auto.Enabled && int(d.Month()) != poolMonth { // first session of the month: re-pick the stocks to scan
+			pl := pickPool(insts, d, cfg.Strategy, auto.TopN, auto.LookbackDays)
+			pool, poolMonth = map[string]bool{}, int(d.Month())
+			for _, s := range pl.Symbols {
+				pool[s] = true
+			}
+			res.Pools = append(res.Pools, pl)
+		}
 		if regime && !paused {
 			for _, x := range insts {
 				if _, held := positions[x.Symbol]; held || cooldown[x.Symbol] > k {
+					continue
+				}
+				if pool != nil && !pool[x.Symbol] {
 					continue
 				}
 				i, ok := x.s.IndexOn(d)

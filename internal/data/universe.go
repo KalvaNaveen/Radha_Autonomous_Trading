@@ -59,14 +59,70 @@ var (
 // a header row are ignored. It returns the unique symbols in order, notes
 // about what was dropped, and an error for an empty or oversized list.
 func ParseUniverse(r io.Reader) ([]string, []string, error) {
+	out, warns, err := parseSymbols(r)
+	if err != nil {
+		return out, warns, err
+	}
+	if len(out) == 0 {
+		return out, warns, errors.New("the universe is empty — add at least one NSE symbol")
+	}
+	if len(out) > MaxUniverse {
+		return out[:MaxUniverse], warns, fmt.Errorf("the universe has %d symbols; the maximum is %d", len(out), MaxUniverse)
+	}
+	return out, warns, nil
+}
+
+// LoadList reads a broad stock list of any length (e.g. NSE's NIFTY 500
+// CSV download: only its "Symbol" column is used).
+func LoadList(path string) ([]string, []string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	out, warns, err := parseSymbols(f)
+	if err == nil && len(out) == 0 {
+		err = fmt.Errorf("%s has no NSE symbols", path)
+	}
+	return out, warns, err
+}
+
+// parseSymbols reads symbols in any pasted format. A CSV whose header row
+// has a "Symbol" column among others (NSE index downloads) is read from that
+// column only.
+func parseSymbols(r io.Reader) ([]string, []string, error) {
 	var out, warns []string
 	seen := map[string]bool{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	col, first := -1, true
 	for sc.Scan() {
 		ln := sc.Text()
 		if k := strings.IndexByte(ln, '#'); k >= 0 {
 			ln = ln[:k]
+		}
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		if first {
+			first = false
+			if fs := strings.Split(ln, ","); len(fs) > 1 {
+				for k, f := range fs {
+					if strings.EqualFold(strings.Trim(strings.TrimSpace(f), `"`+string(rune(0xFEFF))), "symbol") {
+						col = k
+					}
+				}
+				if col >= 0 {
+					continue
+				}
+			}
+		}
+		if col >= 0 {
+			fs := strings.Split(ln, ",")
+			if col >= len(fs) {
+				continue
+			}
+			ln = fs[col]
 		}
 		var tk []string
 		for _, t := range splitRe.Split(strings.TrimSpace(ln), -1) {
@@ -100,16 +156,28 @@ func ParseUniverse(r io.Reader) ([]string, []string, error) {
 			out = append(out, x)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return out, warns, err
+	return out, warns, sc.Err()
+}
+
+var (
+	nonStockSym  = regexp.MustCompile(`(BEES|ETF|IETF)$|^(LIQUID|GILT|SGB)`)
+	nonStockName = regexp.MustCompile(`\bETF\b|EXCHANGE TRADED|\bFUND\b|\bFOF\b`)
+)
+
+// AllEquities lists every ordinary NSE share in the instrument master: the EQ
+// series only (no BE/SM/bond suffixes), without ETFs, index funds and
+// sovereign gold bonds. Liquidity is filtered later from the candles.
+func AllEquities(nse []broker.Instrument) []broker.Instrument {
+	var out []broker.Instrument
+	for _, in := range nse {
+		s := in.TradingSymbol
+		if in.Segment != "NSE" || in.InstrumentType != "EQ" || in.Name == "" || strings.Contains(s, "-") ||
+			!symRe.MatchString(s) || nonStockSym.MatchString(s) || nonStockName.MatchString(strings.ToUpper(in.Name)) {
+			continue
+		}
+		out = append(out, in)
 	}
-	if len(out) == 0 {
-		return out, warns, errors.New("the universe is empty — add at least one NSE symbol")
-	}
-	if len(out) > MaxUniverse {
-		return out[:MaxUniverse], warns, fmt.Errorf("the universe has %d symbols; the maximum is %d", len(out), MaxUniverse)
-	}
-	return out, warns, nil
+	return out
 }
 
 func isNumber(s string) bool {

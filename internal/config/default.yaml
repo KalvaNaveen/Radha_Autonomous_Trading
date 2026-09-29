@@ -138,6 +138,12 @@ market:
 backtest:
   years: 5
   capital: 500000                # ₹ starting capital for backtests (0 = risk.capital)
+  auto_universe:                 # pick the stocks to scan by rule (no hindsight) instead of universe.csv
+    enabled: false
+    source: all_nse              # all_nse: every NSE share (first download ≈ 25 min) · file: a broad list such as the NIFTY 500 CSV
+    file: nifty500.csv
+    top_n: 50                    # each month, scan the 50 strongest stocks…
+    lookback_days: 120           # …by return over the last 120 sessions, among those passing min_price and min_turnover_cr then
 
 # "Hold N stocks" portfolio mode — BACKTEST ONLY for now (the paper/live engine
 # ignores it). The Backtest tab in the control panel overrides these values.
