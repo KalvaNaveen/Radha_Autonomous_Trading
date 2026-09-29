@@ -56,7 +56,7 @@ func main() {
 	if *autoN > 0 { // rule-based stock list: each month the N strongest of every cached stock
 		cfg.Backtest.AutoUniverse = config.AutoUniverseConfig{Enabled: true, Source: "all_nse", TopN: *autoN, LookbackDays: *autoLook}
 	}
-	if *grid == "holdings" || *grid == "full" || *grid == "edge" { // the backtester's capital (the other grids keep risk.capital for comparability)
+	if *grid == "holdings" || *grid == "full" || *grid == "edge" || *grid == "market" { // the backtester's capital (the other grids keep risk.capital for comparability)
 		cfg = cfg.ForBacktest()
 	}
 	syms := map[string]string{}
@@ -73,6 +73,12 @@ func main() {
 		fail(fmt.Errorf("no symbol map: pass -symbols or keep data/instruments"))
 	}
 	universe := map[string]bool{}
+	if *grid == "market" || *grid == "settings" { // the engine's all-NSE pool: ordinary shares only
+		for _, x := range data.AllEquities(data.NewStore(filepath.Dir(*dir), nil, nil).LatestInstruments()) {
+			universe[x.TradingSymbol] = true
+		}
+		*uniPath = ""
+	}
 	if u, _, err := data.LoadUniverse(*uniPath); err == nil {
 		for _, s := range u {
 			universe[s] = true
@@ -255,6 +261,49 @@ func main() {
 		add("3 + exit 3 red HA (any time)", func(s *config.StrategyConfig) { s.HAExit, s.HAExitBars, s.HAExitAlways = "red", 3, true })
 		add("1+3 HA green entry + 3 red exit", func(s *config.StrategyConfig) { s.HAEntry, s.HAExit, s.HAExitBars = "green", "red", 3 })
 		add("2+3 HA EMA/ST + 3 red exit", func(s *config.StrategyConfig) { s.CrossSource, s.HAExit, s.HAExitBars = "ha", "red", 3 })
+	}
+	if *grid == "settings" { // one run with the control panel's saved backtest settings (parity check)
+		var s struct {
+			Capital                               float64
+			Holdings                              bool
+			Slots                                 int
+			EntryMode                             string  `json:"entry_mode"`
+			TrendMaxDays                          int     `json:"trend_max_days"`
+			TrendMaxExtPct                        float64 `json:"trend_max_ext_pct"`
+			MarketCheck                           string  `json:"market_check"`
+			MarketHAGreen                         bool    `json:"market_ha_green"`
+			ResearchAllow, ResearchRank, Universe string
+			TopN                                  int `json:"top_n"`
+			Lookback                              int `json:"lookback_days"`
+		}
+		raw, err := os.ReadFile(filepath.Join(filepath.Dir(*dir), "backtest", "settings.json"))
+		if err != nil {
+			fail(err)
+		}
+		_ = json.Unmarshal(raw, &s)
+		var extra struct {
+			ResearchAllow string `json:"research_allow"`
+			ResearchRank  string `json:"research_rank"`
+			Universe      string `json:"universe_mode"`
+		}
+		_ = json.Unmarshal(raw, &extra)
+		c := cfg
+		c.Risk.Capital = s.Capital
+		c.Holdings.Enabled, c.Holdings.Slots, c.Holdings.MarketCheck, c.Holdings.MarketHAGreen = s.Holdings, s.Slots, s.MarketCheck, s.MarketHAGreen
+		c.Strategy.EntryMode, c.Strategy.TrendMaxDays, c.Strategy.TrendMaxExtPct = s.EntryMode, s.TrendMaxDays, s.TrendMaxExtPct
+		c.Strategy.ResearchAllow, c.Strategy.ResearchRank = extra.ResearchAllow, extra.ResearchRank
+		c.Backtest.AutoUniverse = config.AutoUniverseConfig{Enabled: extra.Universe == "all_nse", Source: "all_nse", TopN: s.TopN, LookbackDays: s.Lookback}
+		in.From, in.To, in.Config = from, to, c
+		r := backtest.Run(in).Summary
+		fmt.Printf("saved settings: ₹%.0f → ₹%.0f  %+.1f%%  CAGR %.2f%%  maxDD %.2f%%  trades %d  symbols %d\n", r.StartEquity, r.EndEquity, r.TotalReturnPct, r.CAGRPct, r.MaxDrawdownPct, r.Trades, r.Symbols)
+		return
+	}
+	if *grid == "market" { // whole NSE, stocks picked by rule each month (no hindsight in the stock list)
+		gSlots, gEntry, gDays, gExt = []int{3, 5, 7, 10}, []string{"cross", "both", "trend"}, []int{15, 30, 60}, []float64{8, 12, 20}
+		gResearch = []string{"all", "RESULTS,TURNAROUND,NEW_HIGH,MOMENTUM", "TURNAROUND,NEW_HIGH,MOMENTUM,NONE", "TURNAROUND,MOMENTUM"}
+		gRank, gStop, gHA = []string{"rs", "research"}, []float64{3, 4}, []string{"green", "off"}
+		gTopN, gLook = []int{20, 50, 100}, []int{60, 120, 250}
+		*grid = "full"
 	}
 	if *grid == "edge" { // extend the full grid past its edges around the leaders
 		gSlots, gEntry, gDays, gExt = []int{2, 3, 4, 5}, []string{"both", "trend"}, []int{30, 45, 60}, []float64{12, 15, 20}

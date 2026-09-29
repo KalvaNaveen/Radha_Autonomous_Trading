@@ -27,6 +27,8 @@ type combo struct {
 	StopATR  float64
 	HA       string
 	Market   string
+	TopN     int // auto universe: stocks scanned each month (0 = off)
+	Look     int // auto universe: strength window, sessions
 
 	Full, H1, H2 backtest.Summary
 	Robust       float64 // median CAGR of this combo and its one-step neighbours
@@ -34,7 +36,7 @@ type combo struct {
 }
 
 func (c *combo) key() string {
-	return fmt.Sprintf("%d|%s|%d|%g|%s|%s|%g|%s|%s", c.Slots, c.Entry, c.Days, c.Ext, c.Research, c.Rank, c.StopATR, c.HA, c.Market)
+	return fmt.Sprintf("%d|%s|%d|%g|%s|%s|%g|%s|%s|%d|%d", c.Slots, c.Entry, c.Days, c.Ext, c.Research, c.Rank, c.StopATR, c.HA, c.Market, c.TopN, c.Look)
 }
 
 func (c *combo) apply(cfg *config.Config) {
@@ -42,6 +44,9 @@ func (c *combo) apply(cfg *config.Config) {
 	s := &cfg.Strategy
 	s.EntryMode, s.TrendMaxDays, s.TrendMaxExtPct = c.Entry, c.Days, c.Ext
 	s.ResearchAllow, s.ResearchRank, s.StopATRMult, s.HAEntry = c.Research, c.Rank, c.StopATR, c.HA
+	if c.TopN > 0 {
+		cfg.Backtest.AutoUniverse = config.AutoUniverseConfig{Enabled: true, Source: "all_nse", TopN: c.TopN, LookbackDays: c.Look}
+	}
 }
 
 var (
@@ -53,11 +58,14 @@ var (
 	gRank     = []string{"rs", "research"}
 	gStop     = []float64{2.5, 3, 4}
 	gHA       = []string{"green", "off"}
+	gTopN     = []int{0} // 0: keep the stock list as loaded
+	gLook     = []int{0}
 )
 
 var researchName = map[string]string{
 	"all": "all", "RESULTS,TURNAROUND,NEW_HIGH,MOMENTUM": "all but NONE", "RESULTS,NEW_HIGH,MOMENTUM": "results+high+momentum",
 	"RESULTS,NEW_HIGH": "results+high", "NEW_HIGH,MOMENTUM": "high+momentum", "RESULTS,TURNAROUND": "results+turnaround",
+	"TURNAROUND,NEW_HIGH,MOMENTUM,NONE": "all but RESULTS", "TURNAROUND,MOMENTUM": "turnaround+momentum",
 }
 
 // fullGrid runs every combination (index gate off) over the whole window and
@@ -77,7 +85,11 @@ func fullGrid(in backtest.Input, cfg config.Config, from, mid, to time.Time, csv
 						for _, rk := range gRank {
 							for _, stp := range gStop {
 								for _, ha := range gHA {
-									cs = append(cs, &combo{Slots: sl, Entry: en, Days: d, Ext: x, Research: r, Rank: rk, StopATR: stp, HA: ha, Market: "off"})
+									for _, tn := range gTopN {
+										for _, lb := range gLook {
+											cs = append(cs, &combo{Slots: sl, Entry: en, Days: d, Ext: x, Research: r, Rank: rk, StopATR: stp, HA: ha, Market: "off", TopN: tn, Look: lb})
+										}
+									}
 								}
 							}
 						}
@@ -86,6 +98,15 @@ func fullGrid(in backtest.Input, cfg config.Config, from, mid, to time.Time, csv
 			}
 		}
 	}
+	// Indicators do not depend on the varied settings: compute them once.
+	pc := cfg
+	if gTopN[0] > 0 {
+		pc.Backtest.AutoUniverse = config.AutoUniverseConfig{Enabled: true, Source: "all_nse", TopN: gTopN[0], LookbackDays: gLook[0]}
+	}
+	in.From, in.To, in.Config = from, to, pc
+	t0 := time.Now()
+	in.Prepared = backtest.Prepare(in)
+	fmt.Printf("indicators ready for %d-stock pool in %s\n", len(in.Instruments), time.Since(t0).Round(time.Second))
 	fmt.Printf("%d combinations × 3 windows on %d workers …\n", len(cs), runtime.NumCPU())
 	var done atomic.Int64
 	start := time.Now()
@@ -194,6 +215,8 @@ func fullGrid(in backtest.Input, cfg config.Config, from, mid, to time.Time, csv
 		{"rank", func(c *combo) string { return c.Rank }},
 		{"stop", func(c *combo) string { return strconv.FormatFloat(c.StopATR, 'g', -1, 64) }},
 		{"HA", func(c *combo) string { return c.HA }},
+		{"topN", func(c *combo) string { return strconv.Itoa(c.TopN) }},
+		{"lookback", func(c *combo) string { return strconv.Itoa(c.Look) }},
 	}
 	for _, d := range dims {
 		groups := map[string][][2]float64{}
@@ -262,8 +285,12 @@ func fullGrid(in backtest.Input, cfg config.Config, from, mid, to time.Time, csv
 }
 
 func (c *combo) label() string {
-	return fmt.Sprintf("hold %d · %s · ≤%dd · ≤%g%% · research %s · rank %s · stop %g×ATR · HA %s",
+	s := fmt.Sprintf("hold %d · %s · ≤%dd · ≤%g%% · research %s · rank %s · stop %g×ATR · HA %s",
 		c.Slots, c.Entry, c.Days, c.Ext, researchName[c.Research], c.Rank, c.StopATR, c.HA)
+	if c.TopN > 0 {
+		s += fmt.Sprintf(" · top %d by %d-day strength", c.TopN, c.Look)
+	}
+	return s
 }
 
 // neighbours are the combos one step away in a single ordered setting.
@@ -297,6 +324,8 @@ func neighbours(c *combo) []*combo {
 	}
 	stepI(gSlots, c.Slots, func(x *combo, v int) { x.Slots = v })
 	stepF(gStop, c.StopATR, func(x *combo, v float64) { x.StopATR = v })
+	stepI(gTopN, c.TopN, func(x *combo, v int) { x.TopN = v })
+	stepI(gLook, c.Look, func(x *combo, v int) { x.Look = v })
 	if c.Entry != "cross" {
 		stepI(gDays, c.Days, func(x *combo, v int) { x.Days = v })
 		stepF(gExt, c.Ext, func(x *combo, v float64) { x.Ext = v })
@@ -323,14 +352,14 @@ func writeCombos(path string, cs []*combo) {
 	w := csv.NewWriter(f)
 	_ = w.Write([]string{"hold", "entry", "trend_max_days", "trend_max_ext_pct", "research", "rank", "stop_atr", "ha_entry", "index_gate",
 		"start", "end", "return_pct", "cagr_pct", "max_dd_pct", "profit_factor", "trades", "win_pct", "invested_pct",
-		"h1_return_pct", "h2_return_pct", "worse_half_pct", "robust_cagr_pct"})
+		"h1_return_pct", "h2_return_pct", "worse_half_pct", "robust_cagr_pct", "top_n", "lookback"})
 	f2 := func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
 	for _, c := range cs {
 		s := c.Full
 		_ = w.Write([]string{strconv.Itoa(c.Slots), c.Entry, strconv.Itoa(c.Days), f2(c.Ext), researchName[c.Research], c.Rank, f2(c.StopATR), c.HA, c.Market,
 			f2(s.StartEquity), f2(s.EndEquity), f2(s.TotalReturnPct), f2(s.CAGRPct), f2(s.MaxDrawdownPct), f2(s.ProfitFactor), strconv.Itoa(s.Trades),
 			f2(s.WinRatePct), f2(s.AvgInvestedPct), f2(c.H1.TotalReturnPct), f2(c.H2.TotalReturnPct),
-			f2(math.Min(c.H1.TotalReturnPct, c.H2.TotalReturnPct)), f2(c.Robust)})
+			f2(math.Min(c.H1.TotalReturnPct, c.H2.TotalReturnPct)), f2(c.Robust), strconv.Itoa(c.TopN), strconv.Itoa(c.Look)})
 	}
 	w.Flush()
 }

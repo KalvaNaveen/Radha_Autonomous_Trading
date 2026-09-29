@@ -48,6 +48,8 @@ type Input struct {
 	// (large | mid | small; unlisted symbols count as large).
 	Indices map[string][]models.Bar
 	Caps    map[string]string
+	// Prepared, when set, supplies precomputed indicator series (see Prepare).
+	Prepared *Prepared
 }
 
 // EquityPoint is one day of the equity curve.
@@ -298,15 +300,20 @@ type inst struct {
 	s *swing.Series
 }
 
-// Run executes the backtest.
-func Run(in Input) Result {
-	cfg := in.Config
-	st := swing.NewStrategy(cfg.Strategy, cfg.Costs)
-	res := Result{Config: cfg, Skipped: map[string]int{}, Rules: DescribeRules(cfg), RulesID: RulesHash(cfg)}
-	slip := indicators.Pct(cfg.Costs.SlippagePct)
-	idx := swing.NewSeries(in.Index, cfg.Strategy)
+// Prepared holds the indicator series of a run's instruments. Studies that
+// run thousands of variants on the same history build it once with Prepare
+// and share it (read-only) between runs, as long as the variants differ only
+// in settings that do not change the indicators (EMA/ATR/Supertrend periods,
+// cross_source, min_price/min_turnover_cr with the auto universe).
+type Prepared struct {
+	idx   *swing.Series
+	insts []*inst
+}
 
-	insts := make([]*inst, 0, len(in.Instruments))
+// Prepare computes the indicator series for in (with in.Config's strategy).
+func Prepare(in Input) *Prepared {
+	cfg := in.Config
+	p := &Prepared{idx: swing.NewSeries(in.Index, cfg.Strategy)}
 	for _, ins := range in.Instruments {
 		if len(ins.Bars) == 0 {
 			continue
@@ -314,8 +321,27 @@ func Run(in Input) Result {
 		if cfg.Backtest.AutoUniverse.Enabled && !everLiquid(ins.Bars, cfg.Strategy, in.From) {
 			continue // never tradable in the window: skip the indicator work (thousands of small caps)
 		}
-		insts = append(insts, &inst{Instrument: ins, s: swing.NewSeries(ins.Bars, cfg.Strategy)})
+		p.insts = append(p.insts, &inst{Instrument: ins, s: swing.NewSeries(ins.Bars, cfg.Strategy)})
 	}
+	return p
+}
+
+// Run executes the backtest.
+func Run(in Input) Result {
+	cfg := in.Config
+	st := swing.NewStrategy(cfg.Strategy, cfg.Costs)
+	res := Result{Config: cfg, Skipped: map[string]int{}, Rules: DescribeRules(cfg), RulesID: RulesHash(cfg)}
+	slip := indicators.Pct(cfg.Costs.SlippagePct)
+	p := in.Prepared
+	if p == nil {
+		p = Prepare(in)
+	}
+	idx, insts := p.idx, p.insts
+	bySym := make(map[string]*inst, len(insts))
+	for _, x := range insts {
+		bySym[x.Symbol] = x
+	}
+	find := func(sym string) *inst { return bySym[sym] }
 
 	// Holdings mode: N equal slots, refilled every morning without a daily cap.
 	hold := cfg.Holdings.Enabled
@@ -437,7 +463,7 @@ func Run(in Input) Result {
 			if p.PendingExit == "" {
 				continue
 			}
-			x := find(insts, p.Symbol)
+			x := find(p.Symbol)
 			if i, ok := x.s.IndexOn(d); ok {
 				sell(p, x.s.Bars[i].Open*(1-slip), d, p.PendingExit, k)
 			}
@@ -452,7 +478,7 @@ func Run(in Input) Result {
 			if _, held := positions[sig.Symbol]; held {
 				continue
 			}
-			x := find(insts, sig.Symbol)
+			x := find(sig.Symbol)
 			i, ok := x.s.IndexOn(d)
 			if !ok {
 				res.Skipped["no bar next day"]++
@@ -515,7 +541,7 @@ func Run(in Input) Result {
 
 		// 2. INTRADAY — stops.
 		for _, p := range sortedPositions(positions) {
-			x := find(insts, p.Symbol)
+			x := find(p.Symbol)
 			i, ok := x.s.IndexOn(d)
 			if !ok {
 				continue
@@ -562,7 +588,7 @@ func Run(in Input) Result {
 
 		// 3. CLOSE — manage, mark, scan.
 		for _, p := range sortedPositions(positions) {
-			x := find(insts, p.Symbol)
+			x := find(p.Symbol)
 			i, ok := x.s.IndexOn(d)
 			if !ok {
 				continue
@@ -651,14 +677,6 @@ func Run(in Input) Result {
 	return res
 }
 
-func find(insts []*inst, sym string) *inst {
-	for _, x := range insts {
-		if x.Symbol == sym {
-			return x
-		}
-	}
-	return nil
-}
 
 func sortedPositions(m map[string]*models.Position) []*models.Position {
 	out := make([]*models.Position, 0, len(m))
