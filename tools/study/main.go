@@ -18,6 +18,7 @@ import (
 
 	"github.com/nkalva/kitealgo/internal/backtest"
 	"github.com/nkalva/kitealgo/internal/config"
+	"github.com/nkalva/kitealgo/internal/data"
 	"github.com/nkalva/kitealgo/pkg/models"
 )
 
@@ -33,6 +34,10 @@ func main() {
 	years := flag.Int("years", 5, "years")
 	grid := flag.String("grid", "ha", "ha: Heikin-Ashi variants · entry: entry-side variants on top of the HA exit")
 	detail := flag.String("detail", "", "print a trade breakdown for the variant with this exact name")
+	uniPath := flag.String("universe", "universe.csv", "only these symbols (missing file: every cached stock)")
+	capsPath := flag.String("caps", "caps.csv", "market-cap categories for the holdings market check")
+	capital := flag.Float64("capital", 0, "starting capital (0: backtest.capital from the config)")
+	outDir := flag.String("out", "", "holdings grid: write the full report of the -detail variant here")
 	flag.Parse()
 
 	cfg := config.Defaults()
@@ -42,13 +47,34 @@ func main() {
 			fail(err)
 		}
 	}
-	var syms map[string]string
-	raw, err := os.ReadFile(*symf)
-	if err != nil {
-		fail(err)
+	if *capital > 0 {
+		cfg.Backtest.Capital = *capital
 	}
-	_ = json.Unmarshal(raw, &syms)
+	if *grid == "holdings" { // the backtester's capital (the other grids keep risk.capital for comparability)
+		cfg = cfg.ForBacktest()
+	}
+	syms := map[string]string{}
+	if raw, err := os.ReadFile(*symf); err == nil {
+		_ = json.Unmarshal(raw, &syms)
+	} else { // token → symbol from the cached instrument master
+		for _, x := range data.NewStore(filepath.Dir(*dir), nil, nil).LatestInstruments() {
+			if x.Segment == "INDICES" || (x.Segment == "NSE" && x.InstrumentType == "EQ") {
+				syms[strconv.FormatUint(uint64(x.InstrumentToken), 10)] = x.TradingSymbol
+			}
+		}
+	}
+	if len(syms) == 0 {
+		fail(fmt.Errorf("no symbol map: pass -symbols or keep data/instruments"))
+	}
+	universe := map[string]bool{}
+	if u, _, err := data.LoadUniverse(*uniPath); err == nil {
+		for _, s := range u {
+			universe[s] = true
+		}
+	}
 	var in backtest.Input
+	in.Indices = map[string][]models.Bar{}
+	in.Caps, _, _ = data.LoadCaps(*capsPath)
 	files, _ := filepath.Glob(filepath.Join(*dir, "*.json"))
 	for _, f := range files {
 		tok := strings.TrimSuffix(filepath.Base(f), ".json")
@@ -62,6 +88,13 @@ func main() {
 		name := syms[tok]
 		if name == "NIFTY 50" {
 			in.Index = cf.Bars
+			continue
+		}
+		if strings.HasPrefix(name, "NIFTY") {
+			in.Indices[name] = cf.Bars
+			continue
+		}
+		if name == "" || (len(universe) > 0 && !universe[name]) {
 			continue
 		}
 		t, _ := strconv.ParseUint(tok, 10, 32)
@@ -216,6 +249,69 @@ func main() {
 		add("3 + exit 3 red HA (any time)", func(s *config.StrategyConfig) { s.HAExit, s.HAExitBars, s.HAExitAlways = "red", 3, true })
 		add("1+3 HA green entry + 3 red exit", func(s *config.StrategyConfig) { s.HAEntry, s.HAExit, s.HAExitBars = "green", "red", 3 })
 		add("2+3 HA EMA/ST + 3 red exit", func(s *config.StrategyConfig) { s.CrossSource, s.HAExit, s.HAExitBars = "ha", "red", 3 })
+	}
+	if *grid == "holdings" {
+		type hv struct {
+			name string
+			f    func(c *config.Config)
+		}
+		on := func(c *config.Config, slots int, entry, market string) {
+			c.Holdings.Enabled, c.Holdings.Slots, c.Holdings.MarketCheck = true, slots, market
+			c.Strategy.EntryMode = entry
+		}
+		hvs := []hv{
+			{"current rules (1% risk sizing, 5 max, 2 new/day)", func(*config.Config) {}},
+			{"hold 5 · fresh cross only · NIFTY check", func(c *config.Config) { on(c, 5, "cross", "nifty") }},
+			{"hold 5 · cross+trend · NIFTY check", func(c *config.Config) { on(c, 5, "both", "nifty") }},
+			{"hold 5 · cross+trend · category check", func(c *config.Config) { on(c, 5, "both", "category") }},
+			{"hold 5 · cross+trend · category, no index HA", func(c *config.Config) {
+				on(c, 5, "both", "category")
+				c.Holdings.MarketHAGreen = false
+			}},
+			{"hold 5 · cross+trend · no market check", func(c *config.Config) { on(c, 5, "both", "off") }},
+			{"hold 5 · trend only · category check", func(c *config.Config) { on(c, 5, "trend", "category") }},
+			{"hold 3 · cross+trend · category check", func(c *config.Config) { on(c, 3, "both", "category") }},
+			{"hold 7 · cross+trend · category check", func(c *config.Config) { on(c, 7, "both", "category") }},
+			{"hold 10 · cross+trend · category check", func(c *config.Config) { on(c, 10, "both", "category") }},
+			{"hold 5 · cross+trend ≤10d · category", func(c *config.Config) { on(c, 5, "both", "category"); c.Strategy.TrendMaxDays = 10 }},
+			{"hold 5 · cross+trend ≤30d · category", func(c *config.Config) { on(c, 5, "both", "category"); c.Strategy.TrendMaxDays = 30 }},
+			{"hold 5 · cross+trend ≤5% ext · category", func(c *config.Config) { on(c, 5, "both", "category"); c.Strategy.TrendMaxExtPct = 5 }},
+			{"hold 5 · cross+trend ≤12% ext · category", func(c *config.Config) { on(c, 5, "both", "category"); c.Strategy.TrendMaxExtPct = 12 }},
+		}
+		fmt.Printf("capital ₹%.0f · indices cached: %d (%s)\n\n", cfg.Risk.Capital, len(in.Indices), strings.Join(keys(in.Indices), ", "))
+		fmt.Printf("%-48s | %12s %8s %6s %6s %5s %4s %5s %6s | %7s %7s\n", "variant", "end ₹", "return%", "CAGR%", "maxDD%", "PF", "trd", "win%", "invst%", "H1 ret%", "H2 ret%")
+		fmt.Println(strings.Repeat("-", 136))
+		for _, v := range hvs {
+			c := cfg
+			v.f(&c)
+			if err := c.Validate(); err != nil {
+				fail(err)
+			}
+			in.From, in.To, in.Config = from, to, c
+			r := backtest.Run(in)
+			f := r.Summary
+			h1, h2 := run(in, c, from, mid), run(in, c, mid, to)
+			fmt.Printf("%-48s | %12.0f %8.1f %6.1f %6.1f %5.2f %4d %5.1f %6.1f | %7.1f %7.1f\n", v.name, f.EndEquity, f.TotalReturnPct, f.CAGRPct,
+				f.MaxDrawdownPct, f.ProfitFactor, f.Trades, f.WinRatePct, f.AvgInvestedPct, h1.TotalReturnPct, h2.TotalReturnPct)
+			if *detail == v.name {
+				for _, y := range f.Yearly {
+					fmt.Printf("    %d  ₹%10.0f → ₹%10.0f  %6.1f%%  (NIFTY %5.1f%%)  %d trades\n", y.Year, y.StartEquity, y.EndEquity, y.ReturnPct, y.BenchmarkPct, y.Trades)
+				}
+				for _, n := range r.Notes {
+					fmt.Println("    note:", n)
+				}
+				fmt.Printf("    skipped: %v\n", r.Skipped)
+				if *outDir != "" {
+					if err := backtest.WriteReport(*outDir, r); err != nil {
+						fail(err)
+					}
+					fmt.Println("    report:", filepath.Join(*outDir, "report.html"))
+				}
+			}
+		}
+		b := run(in, cfg, from, to)
+		fmt.Printf("\nNIFTY buy-and-hold over the full window: %.1f%%\n", b.BenchmarkReturnPc)
+		return
 	}
 	if *grid == "mtf" {
 		type mv struct {
@@ -410,6 +506,15 @@ func ratio(s backtest.Summary) float64 {
 		return 0
 	}
 	return -s.AvgWinPct / s.AvgLossPct
+}
+
+func keys(m map[string][]models.Bar) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func fail(err error) { fmt.Fprintln(os.Stderr, "study:", err); os.Exit(1) }

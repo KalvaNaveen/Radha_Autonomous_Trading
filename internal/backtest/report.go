@@ -68,6 +68,8 @@ func tradeRows(r Result) [][]string {
 }
 
 type view struct {
+	Rules   string
+	Notes   []string
 	S       Summary
 	Chart   template.HTML
 	Trades  [][]string
@@ -123,7 +125,7 @@ func kfmt(v float64) string {
 
 func buildView(r Result) view {
 	rows := tradeRows(r)
-	return view{S: r.Summary, Chart: template.HTML(EquitySVG(r, 900, 280)), Trades: rows[1:], Skipped: r.Skipped, Symbols: r.Summary.Symbols}
+	return view{Rules: r.Rules, Notes: r.Notes, S: r.Summary, Chart: template.HTML(EquitySVG(r, 900, 280)), Trades: rows[1:], Skipped: r.Skipped, Symbols: r.Summary.Symbols}
 }
 
 var reportTmpl = template.Must(template.New("r").Funcs(template.FuncMap{
@@ -146,9 +148,12 @@ table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;font
 th{color:var(--mu);font-weight:600}.g{color:var(--g)}.r{color:var(--r)}.lg span{display:inline-block;width:18px;height:3px;vertical-align:middle;margin:0 6px 0 12px}
 </style></head><body><main>
 <h1>Swing backtest</h1><div class="mu">{{d .S.From}} – {{d .S.To}} · {{.Symbols}} symbols · long-only CNC · costs and slippage included</div>
+{{if .Rules}}<div class="mu" style="margin-top:4px">Rules: {{.Rules}}</div>{{end}}
+{{range .Notes}}<div class="card" style="color:var(--r)">{{.}}</div>{{end}}
 <div class="k">
 <div class="c">Start<b>₹{{f2 .S.StartEquity}}</b></div><div class="c">End<b>₹{{f2 .S.EndEquity}}</b></div>
-<div class="c">Total return<b>{{f1 .S.TotalReturnPct}}%</b></div><div class="c">CAGR<b>{{f1 .S.CAGRPct}}%</b></div>
+<div class="c">Net profit<b>₹{{f2 .S.NetProfit}}</b></div><div class="c">Avg capital invested<b>{{f1 .S.AvgInvestedPct}}%</b></div>
+<div class="c">Total return<b>{{f1 .S.TotalReturnPct}}%</b></div><div class="c">CAGR (compounded)<b>{{f1 .S.CAGRPct}}%</b></div>
 <div class="c">NIFTY CAGR<b>{{f1 .S.BenchmarkCAGRPct}}%</b></div><div class="c">Max drawdown<b class="r">−{{f1 .S.MaxDrawdownPct}}%</b></div>
 <div class="c">Trades<b>{{.S.Trades}}</b></div><div class="c">Win rate<b>{{f1 .S.WinRatePct}}%</b></div>
 <div class="c">Avg win / loss<b>{{f1 .S.AvgWinPct}}% / {{f1 .S.AvgLossPct}}%</b></div><div class="c">Profit factor<b>{{f2 .S.ProfitFactor}}</b></div>
@@ -157,6 +162,8 @@ th{color:var(--mu);font-weight:600}.g{color:var(--g)}.r{color:var(--r)}.lg span{
 </div>
 <div class="card"><div class="lg mu"><span style="background:var(--eq)"></span>Strategy<span style="background:var(--bm)"></span>NIFTY 50 (rebased)</div>{{.Chart}}
 <div class="mu">Max drawdown {{f1 .S.MaxDrawdownPct}}% from {{d .S.MaxDrawdownFrom}} to {{d .S.MaxDrawdownTo}}.</div></div>
+<div class="card"><b>Year by year</b> <span class="mu">(each year starts from the previous year's final value)</span><table><tr><th>Year</th><th>Start ₹</th><th>End ₹</th><th>Profit ₹</th><th>Return</th><th>NIFTY</th><th>Trades closed</th></tr>
+{{range .S.Yearly}}<tr><td>{{.Year}}</td><td>{{f2 .StartEquity}}</td><td>{{f2 .EndEquity}}</td><td class="{{if lt .Net 0.0}}r{{else}}g{{end}}">{{f2 .Net}}</td><td>{{f1 .ReturnPct}}%</td><td>{{f1 .BenchmarkPct}}%</td><td>{{.Trades}}</td></tr>{{end}}</table></div>
 <div class="card"><b>Signals not taken</b><table>{{range $k,$v := .Skipped}}<tr><td>{{$k}}</td><td>{{$v}}</td></tr>{{end}}</table></div>
 <div class="card"><b>Trades</b><table><tr><th>Symbol</th><th>Setup</th><th>Qty</th><th>Entry</th><th>Price</th><th>Exit</th><th>Price</th><th>Net ₹</th><th>R</th><th>Days</th><th>Stage</th><th>Reason</th></tr>
 {{range .Trades}}<tr><td>{{index . 0}}</td><td>{{index . 1}}</td><td>{{index . 2}}</td><td>{{index . 3}}</td><td>{{index . 4}}</td><td>{{index . 5}}</td><td>{{index . 6}}</td>

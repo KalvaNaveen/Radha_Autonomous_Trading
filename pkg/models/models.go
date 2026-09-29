@@ -233,6 +233,7 @@ const (
 	SetupPullback SetupKind = "PULLBACK"
 	SetupBreakout SetupKind = "BREAKOUT"
 	SetupEMACross SetupKind = "EMA_CROSS" // EMA fast crosses above EMA slow with Supertrend green
+	SetupTrend    SetupKind = "TREND"     // already in an EMA-cross uptrend (recent cross, not stretched)
 )
 
 // StopStage tracks how far the stop has been ratcheted.

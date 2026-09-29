@@ -1,10 +1,11 @@
 bin/
 dist/
-data/
-journal/
-logs/
+/data/
+/journal/
+/logs/
 config.yaml
 universe.csv
+caps.csv
 backtest-report/
 rehearsal/
 reh/

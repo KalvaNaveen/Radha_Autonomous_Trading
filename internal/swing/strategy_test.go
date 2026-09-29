@@ -181,6 +181,47 @@ func TestHeikinAshiExit(t *testing.T) {
 	}
 }
 
+// entry_mode both: the fresh cross day is EMA_CROSS; later days in the same
+// uptrend are TREND entries until the cross is too old or price too stretched.
+func TestTrendEntryMode(t *testing.T) {
+	c := config.Defaults()
+	c.Strategy.HAEntry = "off"
+	c.Strategy.EntryMode, c.Strategy.TrendMaxDays, c.Strategy.TrendMaxExtPct = "both", 10, 50
+	st := NewStrategy(c.Strategy, c.Costs)
+	cl := uptrend(80, 600, -2)
+	cl = append(cl, uptrend(60, cl[79]+3, 4)...)
+	s := NewSeries(bars(cl, 1e6), c.Strategy)
+	fresh, trend, lastTrend := -1, 0, -1
+	for i := st.Warmup(); i < len(cl); i++ {
+		sig, ok, _ := st.Evaluate("X", 1, s, i, nil, 0)
+		if !ok {
+			continue
+		}
+		switch sig.Setup {
+		case models.SetupEMACross:
+			fresh = i
+		case models.SetupTrend:
+			trend++
+			lastTrend = i
+		}
+	}
+	if fresh < 0 || trend != 10 || lastTrend != fresh+10 {
+		t.Fatalf("want a fresh cross then 10 trend days (max age 10), got fresh=%d trend=%d last=%d", fresh, trend, lastTrend)
+	}
+	// Too stretched above EMA20: no trend entry.
+	c.Strategy.TrendMaxExtPct = 0.1
+	st = NewStrategy(c.Strategy, c.Costs)
+	if _, ok, why := st.Evaluate("X", 1, s, fresh+3, nil, 0); ok {
+		t.Fatalf("stretched stock must not qualify: %s", why)
+	}
+	// cross mode (default) keeps the old rule: fresh cross only.
+	c.Strategy.EntryMode = "cross"
+	st = NewStrategy(c.Strategy, c.Costs)
+	if _, ok, _ := st.Evaluate("X", 1, s, fresh+3, nil, 0); ok {
+		t.Fatal("entry_mode cross must not take trend entries")
+	}
+}
+
 func TestEMACrossSupertrendEntryAndExit(t *testing.T) {
 	c := config.Defaults()      // ema_cross is the default rule set
 	c.Strategy.BreakevenAtR = 0 // test the pure fixed stop

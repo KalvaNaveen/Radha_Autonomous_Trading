@@ -54,6 +54,7 @@ svg .eq{fill:none;stroke:var(--accent);stroke-width:2}svg .bm{fill:none;stroke:v
 .sym.new{border-color:var(--accent);background:var(--info-bg)}.sym.unk{border-color:var(--bad);background:var(--bad-bg);color:var(--bad)}
 .dirty{color:var(--warn);font-weight:600}
 .legend span{display:inline-block;width:18px;height:3px;vertical-align:middle;margin:0 6px 0 12px}
+.btset{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:4px 12px;margin-top:12px;padding:4px 12px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg)}
 </style>
 </head>
 <body>
@@ -121,6 +122,17 @@ svg .eq{fill:none;stroke:var(--accent);stroke-width:2}svg .bm{fill:none;stroke:v
         <span id="btStatus" class="muted"></span>
         <div class="spacer"></div><a class="btn" id="btReport" href="/backtest/report" target="_blank" hidden>Open full report ↗</a>
       </div>
+      <div class="btset">
+        <div><label for="bsCap">Starting capital ₹</label><input id="bsCap" type="number" min="10000" step="10000"></div>
+        <div><label for="bsMode">Portfolio</label><select id="bsMode"><option value="0">Current rules (1% risk per trade, max positions)</option><option value="1">Hold N stocks, equal split, refill daily</option></select></div>
+        <div class="hq"><label for="bsSlots">Stocks to hold</label><input id="bsSlots" type="number" min="1" max="50"></div>
+        <div><label for="bsEntry">Entry</label><select id="bsEntry"><option value="cross">Fresh EMA cross only</option><option value="both">Fresh cross first, then already trending</option><option value="trend">Already trending (incl. fresh cross)</option></select></div>
+        <div class="tq"><label for="bsDays">Trending: cross at most (days old)</label><input id="bsDays" type="number" min="1" max="120"></div>
+        <div class="tq"><label for="bsExt">Trending: at most % above EMA20</label><input id="bsExt" type="number" min="1" max="50" step="0.5"></div>
+        <div class="hq"><label for="bsMkt">Market check before a buy</label><select id="bsMkt"><option value="category">Stock's own index (large / mid / small cap)</option><option value="nifty">NIFTY 50 for every stock</option><option value="off">Off</option></select></div>
+        <div class="hq"><label for="bsHA">&nbsp;</label><label class="row" style="margin:6px 0 0;color:inherit"><input type="checkbox" id="bsHA" style="width:auto"> Index Heikin-Ashi candle must be green</label></div>
+      </div>
+      <p class="muted" style="margin:6px 0 0">These settings apply to backtests only; the paper/live engine keeps using <code>config.yaml</code>. <a href="#" id="bsDefaults">Reset to config.yaml</a>. Stock categories come from <code>caps.csv</code> (unlisted stocks count as large cap).</p>
       <p class="muted">Downloads daily candles for every stock in your universe plus the index (needs today's Kite login; cached afterwards), then replays the exact live rules — next-day-open entries, gap-aware stops, delivery charges and slippage.</p>
       <div id="btReset" class="banner warn" hidden>
         <b>Reset the backtest?</b> This deletes the saved result shown below. Your paper portfolio, trades journal and settings are not touched.
@@ -253,7 +265,16 @@ function renderBTStatus(){const b=S.backtest||{};$('#btRun').disabled=!!b.runnin
  const fin=b.finished&&!String(b.finished).startsWith('0001');
  if(b.running)$('#btStatus').textContent='Running: '+b.progress;else if(b.error)$('#btStatus').textContent=b.error;else if(fin)$('#btStatus').textContent='Finished '+ftime(b.finished);
  if(b.running)window._btWasRunning=true; else if(window._btWasRunning){window._btWasRunning=false;loadBacktest()}}
-$('#btRun').onclick=async()=>{const r=await api('/api/backtest',{method:'POST',body:JSON.stringify({years:+$('#btYears').value})});if(!r.ok){const j=await r.json();$('#btStatus').textContent=j.error}refresh()};
+let bsLoaded=false,bsDefaults=null;
+function bsFill(s){$('#bsCap').value=s.capital;$('#bsMode').value=s.holdings?'1':'0';$('#bsSlots').value=s.slots;$('#bsEntry').value=s.entry_mode||'cross';
+ $('#bsDays').value=s.trend_max_days;$('#bsExt').value=s.trend_max_ext_pct;$('#bsMkt').value=s.market_check||'category';$('#bsHA').checked=!!s.market_ha_green;bsShow()}
+function bsShow(){const h=$('#bsMode').value==='1',t=$('#bsEntry').value!=='cross';
+ document.querySelectorAll('.btset .hq').forEach(e=>e.hidden=!h);document.querySelectorAll('.btset .tq').forEach(e=>e.hidden=!t);$('#bsHA').disabled=$('#bsMkt').value==='off'}
+['#bsMode','#bsEntry','#bsMkt'].forEach(s=>$(s).addEventListener('change',bsShow));
+$('#bsDefaults').onclick=e=>{e.preventDefault();if(bsDefaults)bsFill(bsDefaults)};
+const bsRead=()=>({capital:+$('#bsCap').value,holdings:$('#bsMode').value==='1',slots:+$('#bsSlots').value,entry_mode:$('#bsEntry').value,
+ trend_max_days:+$('#bsDays').value,trend_max_ext_pct:+$('#bsExt').value,market_check:$('#bsMkt').value,market_ha_green:$('#bsHA').checked});
+$('#btRun').onclick=async()=>{const r=await api('/api/backtest',{method:'POST',body:JSON.stringify({years:+$('#btYears').value,settings:bsRead()})});if(!r.ok){const j=await r.json();$('#btStatus').textContent=j.error}refresh()};
 function eqSVG(eq,start){if(!eq||eq.length<2)return'';const W=900,H=260,pad=40;let lo=Infinity,hi=-Infinity;
  for(const e of eq){lo=Math.min(lo,e.equity,e.benchmark);hi=Math.max(hi,e.equity,e.benchmark)}if(hi<=lo)hi=lo+1;
  const x=i=>pad+i/(eq.length-1)*(W-pad-8),y=v=>8+(hi-v)/(hi-lo)*(H-28);
@@ -272,18 +293,25 @@ $('#btResetGo').onclick=async()=>{$('#btResetGo').disabled=true;
   $('#btReset').hidden=true;$('#btStatus').textContent=$('#btClearCandles').checked?'Reset — result and candles deleted.':'Reset — result deleted.';await loadBacktest();refresh()}
  finally{$('#btResetGo').disabled=false}};
 async function loadBacktest(){const j=await (await fetch('/api/backtest',{cache:'no-store'})).json();
- const cur=j.current||{};
+ const cur=j.current||{};bsDefaults=cur.defaults||null;
+ if(!bsLoaded&&cur.settings){bsFill(cur.settings);bsLoaded=true}
  if(!j.result){$('#btReport').hidden=true;$('#btBody').innerHTML=BT_EMPTY;$('#btRules').hidden=!cur.rules;$('#btRules').innerHTML=cur.rules?'Next run will use: '+esc(cur.rules):'';return}
  const r=j.result,s=r.summary;$('#btReport').hidden=false;
  const stale=!r.rules_hash||r.rules_hash!==cur.rules_hash;
  $('#btRules').hidden=false;
- $('#btRules').innerHTML=(stale?`<span class="chip warn">Out of date</span> This result was made with ${r.rules?'different rules: '+esc(r.rules):'an older version of the engine'}. The engine now uses: <b>${esc(cur.rules||'')}</b>. Press <b>Run backtest</b> to refresh it.`:'Rules: '+esc(r.rules));
- const k=[['Total return',num(s.total_return_pct,1)+'%',sgn(s.total_return_pct)],['CAGR',num(s.cagr_pct,1)+'%',sgn(s.cagr_pct)],['NIFTY CAGR',num(s.benchmark_cagr_pct,1)+'%',''],
+ $('#btRules').innerHTML=(stale?`<span class="chip warn">Out of date</span> This result was made with ${r.rules?'different rules: '+esc(r.rules):'an older version of the engine'}. The next backtest will use: <b>${esc(cur.rules||'')}</b>. Press <b>Run backtest</b> to refresh it.`:'Rules: '+esc(r.rules));
+ const k=[['Starting capital',inr(s.start_equity),''],['Final value',inr(s.end_equity),sgn(s.end_equity-s.start_equity)],['Net profit',inr(s.end_equity-s.start_equity),sgn(s.end_equity-s.start_equity)],
+  ['Total return',num(s.total_return_pct,1)+'%',sgn(s.total_return_pct)],['CAGR (compounded yearly)',num(s.cagr_pct,1)+'%',sgn(s.cagr_pct)],['NIFTY CAGR',num(s.benchmark_cagr_pct,1)+'%',''],
+  ['Avg capital invested',s.avg_invested_pct==null?'—':num(s.avg_invested_pct,0)+'%',''],
   ['Max drawdown','−'+num(s.max_drawdown_pct,1)+'%','neg'],['Trades',s.trades,''],['Win rate',num(s.win_rate_pct,1)+'%',''],['Avg win / loss',num(s.avg_win_pct,1)+'% / '+num(s.avg_loss_pct,1)+'%',''],
   ['Profit factor',num(s.profit_factor),''],['Expectancy',num(s.expectancy_r)+' R',sgn(s.expectancy_r)],['Avg days held',num(s.avg_days_held,1),''],['Time in market',num(s.exposure_pct,0)+'%',''],['Charges paid',inr(s.total_costs),'']];
  const tr=(r.trades||[]).slice(-200).reverse();
  $('#btBody').innerHTML=`<div class="kpis">${k.map(([l,v,c])=>`<div class="kpi"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`).join('')}</div>
+ ${(r.notes||[]).map(n=>`<div class="banner warn" style="margin-top:10px">${esc(n)}</div>`).join('')}
  <div class="legend muted" style="margin-top:12px"><span style="background:var(--accent)"></span>Strategy<span style="background:var(--bm)"></span>${esc('NIFTY 50')} (rebased)</div>${eqSVG(r.equity,s.start_equity)}
+ ${(s.yearly||[]).length?`<h2 style="margin-top:14px">Year by year (each year starts from the previous year's final value)</h2><div class="tablewrap"><table><thead><tr><th>Year</th><th class="num">Start ₹</th><th class="num">End ₹</th><th class="num">Profit ₹</th><th class="num">Return</th><th class="num">NIFTY</th><th class="num">Trades closed</th></tr></thead><tbody>
+ ${s.yearly.map(y=>`<tr><td>${y.year}</td><td class="num">${inr(y.start_equity)}</td><td class="num">${inr(y.end_equity)}</td><td class="num ${sgn(y.net)}">${inr(y.net)}</td><td class="num ${sgn(y.return_pct)}"><b>${num(y.return_pct,1)}%</b></td><td class="num ${sgn(y.benchmark_pct)}">${num(y.benchmark_pct,1)}%</td><td class="num">${y.trades}</td></tr>`).join('')}
+ <tr><td><b>Total</b></td><td class="num">${inr(s.start_equity)}</td><td class="num">${inr(s.end_equity)}</td><td class="num ${sgn(s.end_equity-s.start_equity)}"><b>${inr(s.end_equity-s.start_equity)}</b></td><td class="num ${sgn(s.total_return_pct)}"><b>${num(s.total_return_pct,1)}%</b></td><td class="num">${num(s.benchmark_return_pct,1)}%</td><td class="num">${s.trades}</td></tr></tbody></table></div>`:''}
  <div class="tablewrap"><table><thead><tr><th>Symbol</th><th>Setup</th><th>Entry</th><th class="num">Price</th><th>Exit</th><th class="num">Price</th><th class="num">Net ₹</th><th class="num">R</th><th class="num">Days</th><th>Reason</th></tr></thead><tbody>
  ${tr.map(t=>`<tr><td><b>${esc(t.symbol)}</b></td><td>${esc(t.setup)}</td><td>${fdate(t.entry_date)} ${pd(t.entry_date).getFullYear()}</td><td class="num">${num(t.entry_price)}</td><td>${fdate(t.exit_date)}</td><td class="num">${num(t.exit_price)}</td><td class="num ${sgn(t.net)}">${num(t.net)}</td><td class="num ${sgn(t.r)}">${num(t.r)}</td><td class="num">${t.bars_held}</td><td class="why">${esc(t.reason)}</td></tr>`).join('')}
  </tbody></table></div>`}

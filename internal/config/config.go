@@ -27,6 +27,7 @@ type Config struct {
 	Orders   OrdersConfig   `yaml:"orders"`
 	Market   MarketConfig   `yaml:"market"`
 	Backtest BacktestConfig `yaml:"backtest"`
+	Holdings HoldingsConfig `yaml:"holdings"`
 	Server   ServerConfig   `yaml:"server"`
 	Holidays []string       `yaml:"holidays"`
 	Dev      DevConfig      `yaml:"dev"`
@@ -109,6 +110,14 @@ type StrategyConfig struct {
 	PartialPct       float64 `yaml:"partial_pct"`        // % of the position sold at the target (100 = all); rest trails, stop → breakeven
 	RegimeMode       string  `yaml:"regime_mode"`        // basic: index > rising EMA50 · strict: also index > EMA20 > EMA50
 
+	// ema_cross entry mode: cross = only on the day the cross turns bullish;
+	// trend = also a stock already in that uptrend, if the cross is at most
+	// trend_max_days old and the close at most trend_max_ext_pct above the
+	// slow cross EMA; both = fresh crosses first, then trending stocks.
+	EntryMode      string  `yaml:"entry_mode"`        // cross | trend | both
+	TrendMaxDays   int     `yaml:"trend_max_days"`    // 15
+	TrendMaxExtPct float64 `yaml:"trend_max_ext_pct"` // 8
+
 	// Heikin-Ashi filters (signals only — orders, stops and sizing use real prices).
 	HAEntry      string  `yaml:"ha_entry"`       // off | green | strong (green with no lower wick)
 	HAExit       string  `yaml:"ha_exit"`        // off | red (ha_exit_bars red HA candles in a row) | strong_red
@@ -185,7 +194,44 @@ type MarketConfig struct {
 
 // BacktestConfig holds defaults for the backtester.
 type BacktestConfig struct {
-	Years int `yaml:"years"`
+	Years   int     `yaml:"years"`
+	Capital float64 `yaml:"capital"` // ₹ starting capital for backtests (0 = risk.capital)
+}
+
+// HoldingsConfig is the "hold N stocks" portfolio mode — backtest only for
+// now. The capital is split equally over Slots stocks; every evening each
+// holding is checked against the exit rules, and any empty slot is refilled
+// the next morning with the best stock in the universe that meets the entry
+// rules (no daily limit on new buys; risk-based sizing is not used).
+type HoldingsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	Slots   int  `yaml:"slots"` // stocks held at once
+	// Market check before a buy: off | nifty (NIFTY 50 for every stock) |
+	// category (the stock's own index: NIFTY 50, midcap or smallcap index,
+	// from caps_file). The index must pass regime_mode and, with
+	// market_ha_green, show a green Heikin-Ashi candle.
+	MarketCheck   string `yaml:"market_check"`
+	MarketHAGreen bool   `yaml:"market_ha_green"`
+	MidcapIndex   string `yaml:"midcap_index"`   // "NIFTY MIDCAP 150"
+	SmallcapIndex string `yaml:"smallcap_index"` // "NIFTY SMLCAP 250"
+	CapsFile      string `yaml:"caps_file"`      // SYMBOL,large|mid|small per line; unlisted stocks count as large
+}
+
+// SlotCount is the number of holdings (defaults to max_positions).
+func (c Config) SlotCount() int {
+	if c.Holdings.Slots > 0 {
+		return c.Holdings.Slots
+	}
+	return c.Risk.MaxPositions
+}
+
+// ForBacktest is the config a backtest runs with: backtest.capital (when set)
+// replaces risk.capital as the starting capital.
+func (c Config) ForBacktest() Config {
+	if c.Backtest.Capital > 0 {
+		c.Risk.Capital = c.Backtest.Capital
+	}
+	return c
 }
 
 // ServerConfig is the local control panel.
@@ -221,6 +267,7 @@ func Defaults() Config {
 			ExitOnEMACross: true, StopMode: "atr", FixedStop: true,
 			SwingLowBars: 10, BreakevenAtR: 1.5, TrailMode: "off", TrailStartR: 2, TargetR: 0, PartialPct: 100,
 			HAEntry: "green", HAExit: "off", HAExitBars: 2, HAWickPct: 10,
+			EntryMode: "cross", TrendMaxDays: 15, TrendMaxExtPct: 8,
 		},
 		Risk: RiskConfig{Capital: 100000, RiskPerTradePct: 1.0, MaxPositionPct: 20, MaxPositions: 5,
 			MaxNewPerDay: 2, DrawdownPausePct: 15, DrawdownPauseDays: 20},
@@ -231,7 +278,9 @@ func Defaults() Config {
 			RetryBackoff: 200 * time.Millisecond, EmergencyRetries: 3, MarketProtection: -1,
 			EntryLimitBufferPct: 0.5, GTTLimitBufferPct: 1.0, FillTimeout: 20 * time.Second, EntryMaxAge: 2 * time.Minute},
 		Market:   MarketConfig{Index: "NIFTY 50", RegimeFilter: true},
-		Backtest: BacktestConfig{Years: 5},
+		Backtest: BacktestConfig{Years: 5, Capital: 500000},
+		Holdings: HoldingsConfig{Enabled: false, Slots: 5, MarketCheck: "category", MarketHAGreen: true,
+			MidcapIndex: "NIFTY MIDCAP 150", SmallcapIndex: "NIFTY SMLCAP 250", CapsFile: "caps.csv"},
 		Server:   ServerConfig{Listen: "127.0.0.1:8080", PublicURL: "http://127.0.0.1:8080"},
 	}
 }
@@ -311,6 +360,25 @@ func (c Config) Validate() error {
 	}
 	if s.HAExit == "red" && s.HAExitBars < 1 {
 		add("strategy.ha_exit_bars must be >= 1")
+	}
+	if !oneOf(s.EntryMode, "", "cross", "trend", "both") {
+		add("strategy.entry_mode must be cross, trend or both, got %q", s.EntryMode)
+	}
+	if s.EntryMode == "trend" || s.EntryMode == "both" {
+		if s.TrendMaxDays < 1 || s.TrendMaxExtPct <= 0 {
+			add("strategy: trend_max_days must be >= 1 and trend_max_ext_pct > 0")
+		}
+	}
+	if h := c.Holdings; h.Enabled {
+		if h.Slots < 1 || h.Slots > 50 {
+			add("holdings.slots must be 1..50")
+		}
+		if !oneOf(h.MarketCheck, "", "off", "nifty", "category") {
+			add("holdings.market_check must be off, nifty or category, got %q", h.MarketCheck)
+		}
+	}
+	if c.Backtest.Capital < 0 {
+		add("backtest.capital must be >= 0")
 	}
 	r := c.Risk
 	if r.Capital <= 0 || r.RiskPerTradePct <= 0 || r.RiskPerTradePct > 5 || r.MaxPositions < 1 || r.MaxPositionPct <= 0 || r.MaxPositionPct > 100 {

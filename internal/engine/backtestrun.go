@@ -12,7 +12,9 @@ import (
 	"github.com/nkalva/kitealgo/internal/backtest"
 	"github.com/nkalva/kitealgo/internal/broker"
 	"github.com/nkalva/kitealgo/internal/clock"
+	"github.com/nkalva/kitealgo/internal/config"
 	"github.com/nkalva/kitealgo/internal/data"
+	"github.com/nkalva/kitealgo/pkg/models"
 )
 
 // BacktestStatus is the UI-visible state of the backtest runner.
@@ -64,9 +66,82 @@ func (e *Engine) ResetBacktest(clearCandles bool) error {
 	return nil
 }
 
-// RulesNow describes the rules the engine is running with.
+// BacktestSettings are the backtest-only choices made in the control panel
+// (Backtest tab). They override config.yaml for backtests; the live and
+// paper engine never read them.
+type BacktestSettings struct {
+	Capital        float64 `json:"capital"`
+	Holdings       bool    `json:"holdings"`          // hold N stocks, equal split, refill daily
+	Slots          int     `json:"slots"`             // N
+	EntryMode      string  `json:"entry_mode"`        // cross | trend | both
+	TrendMaxDays   int     `json:"trend_max_days"`    // trending entry: cross at most this old…
+	TrendMaxExtPct float64 `json:"trend_max_ext_pct"` // …and close at most this % above EMA20
+	MarketCheck    string  `json:"market_check"`      // off | nifty | category
+	MarketHAGreen  bool    `json:"market_ha_green"`   // the index's Heikin-Ashi candle must be green
+}
+
+func (e *Engine) btSettingsPath() string {
+	return filepath.Join(e.cfg.Paths.DataDir, "backtest", "settings.json")
+}
+
+// DefaultBacktestSettings mirrors config.yaml.
+func (e *Engine) DefaultBacktestSettings() BacktestSettings {
+	c := e.cfg.ForBacktest()
+	return BacktestSettings{Capital: c.Risk.Capital, Holdings: c.Holdings.Enabled, Slots: c.SlotCount(),
+		EntryMode: orDefault(c.Strategy.EntryMode, "cross"), TrendMaxDays: c.Strategy.TrendMaxDays, TrendMaxExtPct: c.Strategy.TrendMaxExtPct,
+		MarketCheck: orDefault(c.Holdings.MarketCheck, "category"), MarketHAGreen: c.Holdings.MarketHAGreen}
+}
+
+func orDefault(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
+}
+
+// BacktestSettingsNow returns the saved settings (config.yaml defaults if none).
+func (e *Engine) BacktestSettingsNow() BacktestSettings {
+	s := e.DefaultBacktestSettings()
+	if raw, err := os.ReadFile(e.btSettingsPath()); err == nil {
+		_ = json.Unmarshal(raw, &s)
+	}
+	return s
+}
+
+// SaveBacktestSettings validates and stores the settings for the next runs.
+func (e *Engine) SaveBacktestSettings(s BacktestSettings) error {
+	if _, err := e.backtestConfig(s); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(e.btSettingsPath()), 0o755); err != nil {
+		return err
+	}
+	raw, _ := json.MarshalIndent(s, "", "  ")
+	return os.WriteFile(e.btSettingsPath(), raw, 0o644)
+}
+
+// backtestConfig is config.yaml with the backtest settings applied.
+func (e *Engine) backtestConfig(s BacktestSettings) (config.Config, error) {
+	c := e.cfg.ForBacktest()
+	if s.Capital < 10000 || s.Capital > 1e10 {
+		return c, errors.New("capital must be between ₹10,000 and ₹1,000 crore")
+	}
+	c.Risk.Capital = s.Capital
+	c.Holdings.Enabled, c.Holdings.Slots, c.Holdings.MarketCheck, c.Holdings.MarketHAGreen = s.Holdings, s.Slots, s.MarketCheck, s.MarketHAGreen
+	c.Strategy.EntryMode, c.Strategy.TrendMaxDays, c.Strategy.TrendMaxExtPct = s.EntryMode, s.TrendMaxDays, s.TrendMaxExtPct
+	if err := c.Validate(); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// RulesNow describes the rules the next backtest will use.
 func (e *Engine) RulesNow() (summary, hash string) {
-	return backtest.DescribeRules(e.cfg), backtest.RulesHash(e.cfg)
+	c, err := e.backtestConfig(e.BacktestSettingsNow())
+	if err != nil {
+		c = e.cfg.ForBacktest()
+	}
+	return backtest.DescribeRules(c), backtest.RulesHash(c)
 }
 
 // ReportPath is the HTML report of the last run.
@@ -118,6 +193,10 @@ func (e *Engine) StartBacktest(years int) error {
 func (e *Engine) runBacktest(years int, access string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
+	cfg, err := e.backtestConfig(e.BacktestSettingsNow())
+	if err != nil {
+		return fmt.Errorf("backtest settings: %w", err)
+	}
 	kite := broker.NewKite(e.auth.APIKey(), access, e.httpc, e.cfg.Orders.MarketProtection, e.cfg.Dev.APIRoot)
 	ds := data.NewStore(e.cfg.Paths.DataDir, kite, e.log)
 	syms, _, err := data.LoadUniverse(e.cfg.Paths.UniverseFile)
@@ -146,6 +225,34 @@ func (e *Engine) runBacktest(years int, access string) error {
 	if err != nil {
 		return fmt.Errorf("index history: %w", err)
 	}
+	// Holdings mode, category market check: the midcap and smallcap indices
+	// and each stock's category.
+	indices := map[string][]models.Bar{}
+	var caps map[string]string
+	if cfg.Holdings.Enabled && cfg.Holdings.MarketCheck == "category" {
+		for _, name := range []string{cfg.Holdings.MidcapIndex, cfg.Holdings.SmallcapIndex} {
+			x, ok := data.FindIndex(nse, name)
+			if !ok {
+				e.log.Warn("index not found — its stocks are checked against "+cfg.Market.Index, "index", name)
+				continue
+			}
+			e.setBT(func(b *BacktestStatus) { b.Progress = "downloading " + name })
+			bars, err := ds.Daily(ctx, x.InstrumentToken, loadFrom, to)
+			if err != nil {
+				e.log.Warn("index history unavailable", "index", name, "err", err)
+				continue
+			}
+			indices[name] = bars
+		}
+		var warns []string
+		caps, warns, err = data.LoadCaps(cfg.Holdings.CapsFile)
+		for _, w := range warns {
+			e.log.Warn("caps file", "note", w)
+		}
+		if err != nil {
+			return fmt.Errorf("caps file: %w", err)
+		}
+	}
 	var list []backtest.Instrument
 	for n, in := range ins {
 		e.setBT(func(b *BacktestStatus) {
@@ -159,7 +266,7 @@ func (e *Engine) runBacktest(years int, access string) error {
 		list = append(list, backtest.Instrument{Symbol: in.TradingSymbol, Token: in.InstrumentToken, Bars: bars})
 	}
 	e.setBT(func(b *BacktestStatus) { b.Progress = "simulating" })
-	res := backtest.Run(backtest.Input{Instruments: list, Index: idx, From: simFrom, To: to, Config: e.cfg})
+	res := backtest.Run(backtest.Input{Instruments: list, Index: idx, From: simFrom, To: to, Config: cfg, Indices: indices, Caps: caps})
 	if err := backtest.WriteReport(e.btDir(), res); err != nil {
 		return err
 	}

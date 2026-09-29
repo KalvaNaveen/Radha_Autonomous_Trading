@@ -200,12 +200,28 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 	allowBO, allowPB := p.Setups != "pullback" && p.Setups != "ema_cross", p.Setups != "breakout" && p.Setups != "ema_cross"
 	if p.Setups == "ema_cross" {
 		cf, cs, _, _ := crossParams(p)
-		if s.crossUp(i) && !s.crossUp(i-1) {
+		fresh := s.crossUp(i) && !s.crossUp(i-1)
+		switch {
+		case fresh && p.EntryMode != "trend":
 			kind = models.SetupEMACross
 			why = fmt.Sprintf("EMA%d %.2f crossed above EMA%d %.2f with Supertrend green (line %.2f)", cf, s.CrossFast[i], cs, s.CrossSlow[i], s.STLine[i])
-		} else if s.crossUp(i) {
+		case s.crossUp(i) && (p.EntryMode == "trend" || p.EntryMode == "both"):
+			age := 0 // sessions since the EMA/Supertrend condition turned true
+			for k := i; k > 0 && s.crossUp(k-1); k-- {
+				age++
+			}
+			ext := (c/s.CrossSlow[i] - 1) * 100
+			switch {
+			case age > p.TrendMaxDays:
+				return models.Signal{}, false, fmt.Sprintf("in an EMA%d/%d uptrend, but the cross is %d days old (max %d)", cf, cs, age, p.TrendMaxDays)
+			case ext > p.TrendMaxExtPct:
+				return models.Signal{}, false, fmt.Sprintf("in an EMA%d/%d uptrend, but %.1f%% above EMA%d (max %.0f%%) — too stretched", cf, cs, ext, cs, p.TrendMaxExtPct)
+			}
+			kind = models.SetupTrend
+			why = fmt.Sprintf("EMA%d above EMA%d with Supertrend green for %d days; close %.1f%% above EMA%d", cf, cs, age, ext, cs)
+		case s.crossUp(i):
 			return models.Signal{}, false, "EMA cross and Supertrend already bullish — entry only on the day it turns"
-		} else {
+		default:
 			return models.Signal{}, false, fmt.Sprintf("no entry: needs EMA%d above EMA%d and Supertrend green", cf, cs)
 		}
 	} else if allowBO && c > s.PriorHigh[i] && b.Volume >= p.BreakoutVolRatio*prevVolAvg {

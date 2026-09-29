@@ -45,6 +45,7 @@ func main() {
 	if err != nil {
 		fail("config: %v", err)
 	}
+	cfg = cfg.ForBacktest()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	// Last completed session (today's candle is final only after the close).
 	to := clock.Midnight(time.Now())
@@ -63,6 +64,15 @@ func main() {
 		fail("%v", err)
 	}
 	in.From, in.To, in.Config = from, to, cfg
+	if cfg.Holdings.Enabled && cfg.Holdings.MarketCheck == "category" {
+		var warns []string
+		if in.Caps, warns, err = data.LoadCaps(cfg.Holdings.CapsFile); err != nil {
+			fail("caps: %v", err)
+		}
+		for _, w := range warns {
+			fmt.Println("  warning:", w)
+		}
+	}
 	if len(in.Index) > 0 && in.Index[len(in.Index)-1].Date.Before(to) {
 		in.To = in.Index[len(in.Index)-1].Date
 	}
@@ -84,6 +94,13 @@ func main() {
 `, s.From.Format("2006-01-02"), s.To.Format("2006-01-02"), s.StartEquity, s.EndEquity, s.TotalReturnPct, s.CAGRPct,
 		s.BenchmarkCAGRPct, s.MaxDrawdownPct, s.Trades, s.WinRatePct, s.AvgWinPct, s.AvgLossPct, s.ProfitFactor,
 		s.ExpectancyR, s.AvgBarsHeld, s.TotalCosts, filepath.Join(*out, "report.html"))
+	fmt.Println("\n  Year   start ₹        end ₹         return   NIFTY")
+	for _, y := range s.Yearly {
+		fmt.Printf("  %d  %12.0f  %12.0f  %7.1f%%  %6.1f%%\n", y.Year, y.StartEquity, y.EndEquity, y.ReturnPct, y.BenchmarkPct)
+	}
+	for _, n := range res.Notes {
+		fmt.Println("  note:", n)
+	}
 }
 
 func fail(f string, a ...any) {
@@ -123,6 +140,16 @@ func loadKite(cfg config.Config, from, to time.Time, log *slog.Logger) (backtest
 	var in backtest.Input
 	if in.Index, err = ds.Daily(ctx, idxIn.InstrumentToken, from, to); err != nil {
 		return in, err
+	}
+	in.Indices = map[string][]models.Bar{}
+	if cfg.Holdings.Enabled && cfg.Holdings.MarketCheck == "category" {
+		for _, name := range []string{cfg.Holdings.MidcapIndex, cfg.Holdings.SmallcapIndex} {
+			if x, ok := data.FindIndex(nse, name); ok {
+				if bars, err := ds.Daily(ctx, x.InstrumentToken, from, to); err == nil {
+					in.Indices[name] = bars
+				}
+			}
+		}
 	}
 	for n, x := range ins {
 		fmt.Printf("\r  downloading %d/%d %-12s", n+1, len(ins), x.TradingSymbol)

@@ -86,6 +86,59 @@ func TestBacktestInvariants(t *testing.T) {
 		res.Summary.Trades, res.Summary.WinRatePct, res.Summary.CAGRPct, res.Summary.MaxDrawdownPct, res.Summary.ExpectancyR)
 }
 
+// Holdings mode: never more than N positions, each bought with about
+// equity ÷ N, and the yearly returns compound into the total return.
+func TestHoldingsMode(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Holdings.Enabled, cfg.Holdings.Slots, cfg.Holdings.MarketCheck = true, 4, "category"
+	cfg.Strategy.EntryMode = "both"
+	cfg.Risk.Capital = 500000
+	var ins []Instrument
+	caps := map[string]string{}
+	for i := 0; i < 12; i++ {
+		sym := string(rune('A' + i))
+		ins = append(ins, Instrument{Symbol: sym, Token: uint32(i + 1), Bars: synth(int64(i+7), 900, 300+50*float64(i), 0.0006, 0.018)})
+		caps[sym] = []string{"large", "mid", "small"}[i%3]
+	}
+	idx := synth(99, 900, 15000, 0.0004, 0.009)
+	mid := synth(98, 900, 30000, 0.0005, 0.011)
+	in := Input{Instruments: ins, Index: idx, From: idx[120].Date, To: idx[len(idx)-1].Date, Config: cfg,
+		Indices: map[string][]models.Bar{cfg.Holdings.MidcapIndex: mid}, Caps: caps}
+	res := Run(in)
+	if res.Summary.Trades == 0 {
+		t.Fatal("expected trades")
+	}
+	if len(res.Notes) != 1 { // the smallcap index is missing → falls back to NIFTY 50, with a note
+		t.Fatalf("want one fallback note, got %v", res.Notes)
+	}
+	eqOn := map[string]float64{}
+	for _, e := range res.Equity {
+		if e.Cash < -1e-6 || e.Positions > 4 {
+			t.Fatalf("%s: cash %.2f positions %d", e.Date.Format("2006-01-02"), e.Cash, e.Positions)
+		}
+		eqOn[e.Date.Format("2006-01-02")] = e.Equity
+	}
+	for _, tr := range res.Trades {
+		if tr.Reason == "end of backtest" {
+			continue
+		}
+		v := tr.EntryPrice * float64(tr.Quantity)
+		if v > 500000*3 { // sanity: no position near the whole account
+			t.Fatalf("oversized position: %+v", tr)
+		}
+	}
+	prod := 1.0
+	for _, y := range res.Summary.Yearly {
+		prod *= 1 + y.ReturnPct/100
+	}
+	if got := (prod - 1) * 100; math.Abs(got-res.Summary.TotalReturnPct) > 0.01 {
+		t.Fatalf("yearly returns must compound to the total: %.4f vs %.4f", got, res.Summary.TotalReturnPct)
+	}
+	if res.Summary.NetProfit != res.Summary.EndEquity-res.Summary.StartEquity {
+		t.Fatal("net profit")
+	}
+}
+
 // A position that gaps below its stop must be sold at the open, not the stop.
 func TestGapThroughStopFillsAtOpen(t *testing.T) {
 	cfg := config.Defaults()

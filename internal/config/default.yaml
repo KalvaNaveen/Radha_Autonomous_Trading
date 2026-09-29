@@ -38,6 +38,9 @@ strategy:             # daily candles
   cross_trend_filter: false      # true: also require close > rising EMA50 (5-yr study: worse in 2024–26)
   cross_source: close            # close | ha — EMA cross and Supertrend on real or Heikin-Ashi candles (ha: mixed by half)
   regime_mode: strict            # strict: NIFTY > 20 EMA > 50 EMA and the 50 EMA rising (5-yr study: +28% vs +15% for basic)
+  entry_mode: cross              # cross: only on the day the EMA cross turns · trend: also stocks already in that uptrend · both: fresh crosses first
+  trend_max_days: 15             # trend/both: the cross is at most 15 sessions old…
+  trend_max_ext_pct: 8           # …and the close at most 8% above EMA20 (not stretched)
   ema_fast: 20                   # used by breakout/pullback and the trend filter
   ema_slow: 50
   atr_period: 14
@@ -129,6 +132,18 @@ market:
 
 backtest:
   years: 5
+  capital: 500000                # ₹ starting capital for backtests (0 = risk.capital)
+
+# "Hold N stocks" portfolio mode — BACKTEST ONLY for now (the paper/live engine
+# ignores it). The Backtest tab in the control panel overrides these values.
+holdings:
+  enabled: false
+  slots: 5                       # stocks held at once; capital split equally, empty slots refilled every morning
+  market_check: category         # off | nifty (NIFTY 50 for every stock) | category (the stock's own index, from caps_file)
+  market_ha_green: true          # the index's Heikin-Ashi candle must also be green
+  midcap_index: "NIFTY MIDCAP 150"
+  smallcap_index: "NIFTY SMLCAP 250"
+  caps_file: caps.csv            # SYMBOL,large|mid|small per line; unlisted stocks count as large
 
 server:
   listen: "127.0.0.1:8080"

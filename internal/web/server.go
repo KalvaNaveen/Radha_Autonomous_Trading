@@ -307,11 +307,18 @@ func (s *Server) postCredentials(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) postBacktest(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Years int `json:"years"`
+		Years    int                      `json:"years"`
+		Settings *engine.BacktestSettings `json:"settings"`
 	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in)
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in)
 	if in.Years == 0 {
 		in.Years = s.eng.Config().Backtest.Years
+	}
+	if in.Settings != nil {
+		if err := s.eng.SaveBacktestSettings(*in.Settings); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
 	}
 	if err := s.eng.StartBacktest(in.Years); err != nil {
 		writeErr(w, 400, err.Error())
@@ -334,7 +341,8 @@ func (s *Server) resetBacktest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getBacktest(w http.ResponseWriter, r *http.Request) {
 	rules, hash := s.eng.RulesNow()
-	cur, _ := json.Marshal(map[string]string{"rules": rules, "rules_hash": hash})
+	cur, _ := json.Marshal(map[string]any{"rules": rules, "rules_hash": hash,
+		"settings": s.eng.BacktestSettingsNow(), "defaults": s.eng.DefaultBacktestSettings()})
 	raw, err := s.eng.LatestBacktest()
 	if err != nil {
 		writeJSON(w, map[string]any{"status": s.eng.BacktestState(), "current": json.RawMessage(cur)})
