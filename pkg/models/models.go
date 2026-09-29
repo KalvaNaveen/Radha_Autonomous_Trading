@@ -286,6 +286,32 @@ type Signal struct {
 	Reason          string    `json:"reason"`
 	Research        string    `json:"research,omitempty"`      // primary research tag (RESULTS, TURNAROUND, NEW_HIGH, MOMENTUM, NONE)
 	ResearchNote    string    `json:"research_note,omitempty"` // the evidence behind every tag found
+	AI              *AINote   `json:"ai,omitempty"`            // web research note (paper/live only)
+}
+
+// AISource is one web page an AI research note cites.
+type AISource struct {
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+// AINote is the web research on one candidate (Gemini + Google Search).
+type AINote struct {
+	Symbol   string     `json:"symbol"`
+	Date     string     `json:"date"`     // the scan date
+	Verdict  string     `json:"verdict"`  // OK | CAUTION | AVOID
+	Story    string     `json:"story"`    // NEW_OPPORTUNITY | TURNAROUND | SECTOR_TAILWIND | RESULTS | NO_CLEAR_STORY
+	Summary  string     `json:"summary"`  // two or three sentences
+	Results  string     `json:"results"`  // latest quarter vs a year ago
+	Business string     `json:"business"` // orders, new products, capacity, contracts
+	People   string     `json:"people"`   // management / promoter changes
+	Sector   string     `json:"sector"`   // sector trend
+	Risks    []string   `json:"risks"`
+	Sources  []AISource `json:"sources"`
+	Searches []string   `json:"searches,omitempty"`
+	Model    string     `json:"model"`
+	At       time.Time  `json:"at"`
+	Error    string     `json:"error,omitempty"`
 }
 
 // Trade is one completed round trip.

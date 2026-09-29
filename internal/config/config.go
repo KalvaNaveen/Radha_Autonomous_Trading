@@ -29,6 +29,7 @@ type Config struct {
 	Market   MarketConfig   `yaml:"market"`
 	Backtest BacktestConfig `yaml:"backtest"`
 	Holdings HoldingsConfig `yaml:"holdings"`
+	Research ResearchConfig `yaml:"research"`
 	Server   ServerConfig   `yaml:"server"`
 	Holidays []string       `yaml:"holidays"`
 	Dev      DevConfig      `yaml:"dev"`
@@ -238,6 +239,15 @@ type HoldingsConfig struct {
 	CapsFile      string `yaml:"caps_file"`      // SYMBOL,large|mid|small per line; unlisted stocks count as large
 }
 
+// ResearchConfig is the AI web research on entry candidates (paper/live
+// only), done in the evening run with Google Gemini + Google Search.
+type ResearchConfig struct {
+	AI           string `yaml:"ai"`             // off | note (attach the note) | gate (also drop AVOID verdicts)
+	GeminiAPIKey string `yaml:"gemini_api_key"` // or env GEMINI_API_KEY, or saved from the control panel
+	Model        string `yaml:"model"`          // gemini-2.5-flash: its free tier includes Google Search (500/day)
+	MaxPerDay    int    `yaml:"max_per_day"`    // candidates researched each evening (strongest first)
+}
+
 // SlotCount is the number of holdings (defaults to max_positions).
 func (c Config) SlotCount() int {
 	if c.Holdings.Slots > 0 {
@@ -301,6 +311,7 @@ func Defaults() Config {
 		Market:   MarketConfig{Index: "NIFTY 50", RegimeFilter: true},
 		Backtest: BacktestConfig{Years: 5, Capital: 500000,
 			AutoUniverse: AutoUniverseConfig{Source: "all_nse", File: "nifty500.csv", TopN: 50, LookbackDays: 120}},
+		Research: ResearchConfig{AI: "off", Model: "gemini-2.5-flash", MaxPerDay: 8},
 		Holdings: HoldingsConfig{Enabled: false, Slots: 5, MarketCheck: "off", MarketHAGreen: true,
 			MidcapIndex: "NIFTY MIDCAP 150", SmallcapIndex: "NIFTY SMLCAP 250", CapsFile: "caps.csv"},
 		Server:   ServerConfig{Listen: "127.0.0.1:8080", PublicURL: "http://127.0.0.1:8080"},
@@ -316,6 +327,9 @@ func Load(path string) (Config, error) {
 	}
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
+	}
+	if k := os.Getenv("GEMINI_API_KEY"); k != "" {
+		cfg.Research.GeminiAPIKey = k
 	}
 	if s := os.Getenv("KITE_API_SECRET"); s != "" {
 		cfg.Kite.APISecret = s
@@ -408,6 +422,9 @@ func (c Config) Validate() error {
 		if !oneOf(h.MarketCheck, "", "off", "nifty", "category") {
 			add("holdings.market_check must be off, nifty or category, got %q", h.MarketCheck)
 		}
+	}
+	if !oneOf(c.Research.AI, "", "off", "note", "gate") {
+		add("research.ai must be off, note or gate, got %q", c.Research.AI)
 	}
 	if c.Backtest.Capital < 0 {
 		add("backtest.capital must be >= 0")

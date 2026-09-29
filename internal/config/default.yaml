@@ -145,6 +145,19 @@ backtest:
     top_n: 50                    # each month, scan the 50 strongest stocks…
     lookback_days: 120           # …by return over the last 120 sessions, among those passing min_price and min_turnover_cr then
 
+# AI web research on each entry candidate (paper/live only — web research can't
+# be backtested without hindsight). In the evening run, Google Gemini searches
+# Google for recent results, orders, management changes, sector news and red
+# flags, and writes a short note with source links on every candidate.
+# Free key: aistudio.google.com → Get API key (no card). Free-tier requests may
+# be used by Google to improve its products; only stock names and public news
+# questions are sent.
+research:
+  ai: off                        # off | note (attach the note) | gate (also skip stocks with an AVOID verdict)
+  gemini_api_key: ""             # or env GEMINI_API_KEY, or paste it in the control panel
+  model: gemini-2.5-flash        # its free tier includes Google Search grounding (up to 500 requests a day)
+  max_per_day: 8                 # candidates researched each evening, strongest first
+
 # "Hold N stocks" portfolio mode — BACKTEST ONLY for now (the paper/live engine
 # ignores it). The Backtest tab in the control panel overrides these values.
 holdings:

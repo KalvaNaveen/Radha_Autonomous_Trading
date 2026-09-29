@@ -101,6 +101,13 @@ svg .eq{fill:none;stroke:var(--accent);stroke-width:2}svg .bm{fill:none;stroke:v
     </div>
 
     <div data-p="cand">
+      <div class="btset" style="margin:0 0 12px">
+        <div style="grid-column:1/-1"><b>AI research</b> <span class="muted">— each evening, Google Gemini searches the web for results, orders, management changes, sector news and red flags on the strongest candidates, and writes a short note with source links. Paper/live only (can't be backtested without hindsight).</span></div>
+        <div><label for="aiMode">Use of the note</label><select id="aiMode"><option value="off">Off</option><option value="note">Show the note only</option><option value="gate">Show the note and skip AVOID verdicts</option></select></div>
+        <div><label for="aiKey">Gemini API key <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">(free — get one)</a></label><input id="aiKey" type="password" autocomplete="off" placeholder="paste to set or change"></div>
+        <div><label>&nbsp;</label><div class="row"><button id="aiSave">Save</button><button id="aiRun" title="Research tomorrow's queued candidates now">Research now</button></div></div>
+        <div style="grid-column:1/-1" class="muted" id="aiMsg"></div>
+      </div>
       <p class="muted" id="candNote" style="margin-top:0"></p>
       <div class="tablewrap"><table>
         <thead><tr><th>#</th><th>Symbol</th><th>Setup</th><th class="num">Signal close</th><th class="num">Stop</th><th class="num">Risk %</th><th class="num">RS vs index</th><th>Why</th></tr></thead>
@@ -251,10 +258,24 @@ function renderPositions(){const ps=S.portfolio.positions||[];
   <td class="num ${sgn(p.r_now)}">${num(p.r_now)}</td><td class="num">${num(p.stop)}</td><td>${esc(STAGE_TXT[p.stage]||p.stage)}</td>
   <td>${p.gtt_id?`<span class="chip good">armed ${num(p.gtt_trigger)}</span>`:'<span class="chip bad">not armed</span>'}</td>
   <td class="why">${p.pending_exit?'<b style="color:var(--warn)">SELL next morning:</b> '+esc(p.pending_exit):'hold'}</td></tr>`).join('')||`<tr><td colspan="13" class="empty">No open positions. The evening scan queues candidates; the morning run buys them.</td></tr>`}
-function renderCandidates(){const p=S.portfolio;const pend=p.pending||[];
+const AIV={OK:'good',CAUTION:'warn',AVOID:'bad'};
+function aiHTML(n){if(!n)return'';
+ if(n.error&&!n.verdict)return`<br><span class="chip warn">AI research failed</span> ${esc(n.error)}`;
+ const src=(n.sources||[]).map((x,i)=>{let h='';try{h=new URL(x.url).hostname.replace(/^www\./,'')}catch(e){}return`<a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">[${i+1}] ${esc(x.title||h)}</a>`}).join(' ');
+ const row=(l,v)=>v&&!/^not found/i.test(v)?`<br><b>${l}:</b> ${esc(v)}`:'';
+ return`<details style="margin-top:4px"><summary><span class="chip ${AIV[n.verdict]||''}">AI: ${esc(n.verdict||'?')}</span> ${esc((n.story||'').replace(/_/g,' ').toLowerCase())} — ${esc(n.summary||'')}</summary>
+ ${row('Results',n.results)}${row('Business',n.business)}${row('Management',n.people)}${row('Sector',n.sector)}${(n.risks||[]).length?'<br><b>Risks:</b> '+n.risks.map(esc).join('; '):''}
+ ${n.error?`<br><span style="color:var(--warn)">${esc(n.error)}</span>`:''}<br><b>Sources:</b> ${src||'none'} <span class="muted">· ${esc(n.model||'')} · verify before trading</span></details>`}
+function renderAI(){const a=S.research||{};if(document.activeElement!==$('#aiMode'))$('#aiMode').value=a.mode||'off';
+ $('#aiKey').placeholder=a.key_set?`saved (${a.key_hint}) — paste to change`:'paste your free key';$('#aiRun').disabled=!a.key_set}
+$('#aiSave').onclick=async()=>{const r=await api('/api/research/settings',{method:'POST',body:JSON.stringify({mode:$('#aiMode').value,key:$('#aiKey').value})});const j=await r.json();
+ $('#aiMsg').textContent=r.ok?'Saved.':j.error;if(r.ok){$('#aiKey').value='';refresh()}};
+$('#aiRun').onclick=async()=>{const r=await api('/api/research/run',{method:'POST'});const j=await r.json();
+ $('#aiMsg').textContent=r.ok?'Researching the queued candidates in the background (about 15 s each) — notes appear here as they finish.':j.error};
+function renderCandidates(){renderAI();const p=S.portfolio;const pend=p.pending||[];
  $('#candNote').innerHTML=p.pending_for?`Queued for the morning run on <b>${fdate(p.pending_for)}</b> (best relative strength first; filled up to ${S.config.max_positions} positions, max ${S.config.max_new_per_day} new per day). Last scan: ${p.last_evening||'—'}. ${esc(p.regime||'')}`:'The evening run has not scanned yet.';
  $('#pending').innerHTML=pend.map((s,i)=>`<tr><td>${i+1}</td><td><b>${esc(s.symbol)}</b></td><td>${esc(s.setup)}</td><td class="num">${num(s.close)}</td><td class="num">${num(s.stop)}</td>
-  <td class="num">${num((s.close-s.stop)/s.close*100)}%</td><td class="num ${sgn(s.rs)}">${num(s.rs,1)}</td><td class="why">${esc(s.reason)}${s.research_note?'<br><b>Research:</b> '+esc(s.research_note):''}</td></tr>`).join('')||`<tr><td colspan="8" class="empty">No candidates for the next session.</td></tr>`;
+  <td class="num">${num((s.close-s.stop)/s.close*100)}%</td><td class="num ${sgn(s.rs)}">${num(s.rs,1)}</td><td class="why">${esc(s.reason)}${s.research_note?'<br><b>Research:</b> '+esc(s.research_note):''}${aiHTML(s.ai)}</td></tr>`).join('')||`<tr><td colspan="8" class="empty">No candidates for the next session.</td></tr>`;
  $('#scan').innerHTML=(p.scanned||[]).map(r=>`<tr><td><b>${esc(r.symbol)}</b></td><td class="num">${num(r.close)}</td><td class="num ${sgn(r.rs)}">${num(r.rs,1)}</td>
   <td>${r.signal?`<span class="chip good">${esc(r.setup)}</span>`:''}</td><td class="why">${esc(r.reason)}</td></tr>`).join('')||`<tr><td colspan="5" class="empty">No scan yet.</td></tr>`}
 function renderBanners(){const b=[...flash];if(S.mode==='live')b.push(['bad','LIVE MODE — real delivery orders are placed on your Zerodha account.']);

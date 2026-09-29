@@ -613,6 +613,16 @@ func (e *Engine) evening(ctx context.Context, d *dayCtx, day time.Time) error {
 		rows = append(rows, row)
 	}
 	swing.SortSignals(sigs, e.cfg.Strategy)
+	names := map[string]string{}
+	for _, in := range ins {
+		names[in.TradingSymbol] = in.Name
+	}
+	sigs, dropped := e.applyResearch(ctx, sigs, day, names)
+	for k := range rows {
+		if why, ok := dropped[rows[k].Symbol]; ok {
+			rows[k].Reason += " — not taken: " + why
+		}
+	}
 	sort.SliceStable(rows, func(a, b int) bool {
 		if rows[a].Signal != rows[b].Signal {
 			return rows[a].Signal

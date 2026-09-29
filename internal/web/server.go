@@ -75,6 +75,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/backtest", s.guard(s.postBacktest))
 	mux.HandleFunc("GET /api/backtest", s.getBacktest)
 	mux.HandleFunc("POST /api/backtest/reset", s.guard(s.resetBacktest))
+	mux.HandleFunc("POST /api/research/settings", s.guard(s.postResearchSettings))
+	mux.HandleFunc("POST /api/research/run", s.guard(s.postResearchRun))
 	mux.HandleFunc("GET /backtest/report", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, s.eng.ReportPath())
 	})
@@ -188,6 +190,7 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 			"dev_mock": cfg.Dev.APIRoot != "", "bind_ip": cfg.Network.BindIP,
 		},
 		"universe": uinfo,
+		"research": s.eng.ResearchState(),
 		"portfolio": map[string]any{
 			"cash": st.Cash, "equity": eq, "invested": eq - st.Cash, "realized": st.Realized, "peak": st.PeakEquity,
 			"drawdown_pct": dd, "positions": pos, "pending": st.Pending, "pending_for": st.PendingFor,
@@ -321,6 +324,31 @@ func (s *Server) postBacktest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.eng.StartBacktest(in.Years); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) postResearchSettings(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Mode string `json:"mode"`
+		Key  string `json:"key"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in); err != nil {
+		writeErr(w, 400, "bad JSON")
+		return
+	}
+	if err := s.eng.SaveResearch(in.Mode, in.Key); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	s.log.Info("AI research settings saved from UI", "mode", in.Mode, "key_changed", in.Key != "")
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) postResearchRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.eng.ResearchPending(); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
