@@ -236,5 +236,5 @@ func CloseTrade(p *models.Position, exitPx float64, exitDate time.Time, reason s
 	}
 	return models.Trade{Symbol: p.Symbol, Setup: p.Setup, Quantity: p.Quantity, EntryDate: p.EntryDate,
 		EntryPrice: p.EntryPrice, ExitDate: exitDate, ExitPrice: exitPx, Gross: gross, Costs: tot, Net: gross - tot,
-		RMultiple: r, BarsHeld: p.BarsHeld, Stage: p.Stage, Reason: reason}
+		RMultiple: r, BarsHeld: p.BarsHeld, Stage: p.Stage, Reason: reason, Research: p.Research}
 }

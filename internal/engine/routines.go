@@ -391,12 +391,12 @@ func (e *Engine) enter(ctx context.Context, d *dayCtx, snap swing.State, qs map[
 			s.Cash -= fill*float64(n) + bc
 			s.Positions[sg.Symbol] = &models.Position{InstrumentToken: sg.InstrumentToken, Symbol: sg.Symbol, Quantity: n,
 				EntryPrice: fill, EntryDate: d.day, Setup: sg.Setup, InitialStop: sg.Stop, Stop: sg.Stop,
-				Stage: models.StageInitial, HighestClose: fill, LastPrice: fill, LastClose: fill, EntryCosts: bc}
+				Stage: models.StageInitial, HighestClose: fill, LastPrice: fill, LastClose: fill, EntryCosts: bc, Research: sg.Research}
 		})
 		brokerCash -= fill*float64(n) + bc
 		newToday++
 		e.log.Info("BOUGHT", "symbol", sg.Symbol, "qty", n, "price", round2(fill), "stop", round2(sg.Stop),
-			"risk", round2((fill-sg.Stop)*float64(n)), "setup", sg.Setup)
+			"risk", round2((fill-sg.Stop)*float64(n)), "setup", sg.Setup, "research", sg.ResearchNote)
 		e.armStop(ctx, d, sg.Symbol)
 	}
 }
@@ -612,7 +612,7 @@ func (e *Engine) evening(ctx context.Context, d *dayCtx, day time.Time) error {
 		}
 		rows = append(rows, row)
 	}
-	sort.SliceStable(sigs, func(a, b int) bool { return sigs[a].Score > sigs[b].Score })
+	swing.SortSignals(sigs, e.cfg.Strategy)
 	sort.SliceStable(rows, func(a, b int) bool {
 		if rows[a].Signal != rows[b].Signal {
 			return rows[a].Signal

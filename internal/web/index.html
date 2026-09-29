@@ -129,7 +129,9 @@ svg .eq{fill:none;stroke:var(--accent);stroke-width:2}svg .bm{fill:none;stroke:v
         <div><label for="bsEntry">Entry</label><select id="bsEntry"><option value="cross">Fresh EMA cross only</option><option value="both">Fresh cross first, then already trending</option><option value="trend">Already trending (incl. fresh cross)</option></select></div>
         <div class="tq"><label for="bsDays">Trending: cross at most (days old)</label><input id="bsDays" type="number" min="1" max="120"></div>
         <div class="tq"><label for="bsExt">Trending: at most % above EMA20</label><input id="bsExt" type="number" min="1" max="50" step="0.5"></div>
-        <div class="hq"><label for="bsMkt">Market check before a buy</label><select id="bsMkt"><option value="category">Stock's own index (large / mid / small cap)</option><option value="nifty">NIFTY 50 for every stock</option><option value="off">Off</option></select></div>
+        <div class="hq"><label for="bsMkt">Market check before a buy</label><select id="bsMkt"><option value="off">Off — no index gate</option><option value="category">Stock's own index (large / mid / small cap)</option><option value="nifty">NIFTY 50 for every stock</option></select></div>
+        <div style="grid-column:1/-1"><label>Research — buy only stocks that came up for one of these reasons</label><div class="row" id="bsTags"></div></div>
+        <div><label for="bsRank">Rank candidates by</label><select id="bsRank"><option value="rs">Relative strength vs NIFTY</option><option value="research">Research tag first (results › turnaround › 52-week high › momentum), then strength</option></select></div>
         <div class="hq"><label for="bsHA">&nbsp;</label><label class="row" style="margin:6px 0 0;color:inherit"><input type="checkbox" id="bsHA" style="width:auto"> Index Heikin-Ashi candle must be green</label></div>
       </div>
       <p class="muted" style="margin:6px 0 0">These settings apply to backtests only; the paper/live engine keeps using <code>config.yaml</code>. <a href="#" id="bsDefaults">Reset to config.yaml</a>. Stock categories come from <code>caps.csv</code> (unlisted stocks count as large cap).</p>
@@ -248,7 +250,7 @@ function renderPositions(){const ps=S.portfolio.positions||[];
 function renderCandidates(){const p=S.portfolio;const pend=p.pending||[];
  $('#candNote').innerHTML=p.pending_for?`Queued for the morning run on <b>${fdate(p.pending_for)}</b> (best relative strength first; filled up to ${S.config.max_positions} positions, max ${S.config.max_new_per_day} new per day). Last scan: ${p.last_evening||'—'}. ${esc(p.regime||'')}`:'The evening run has not scanned yet.';
  $('#pending').innerHTML=pend.map((s,i)=>`<tr><td>${i+1}</td><td><b>${esc(s.symbol)}</b></td><td>${esc(s.setup)}</td><td class="num">${num(s.close)}</td><td class="num">${num(s.stop)}</td>
-  <td class="num">${num((s.close-s.stop)/s.close*100)}%</td><td class="num ${sgn(s.rs)}">${num(s.rs,1)}</td><td class="why">${esc(s.reason)}</td></tr>`).join('')||`<tr><td colspan="8" class="empty">No candidates for the next session.</td></tr>`;
+  <td class="num">${num((s.close-s.stop)/s.close*100)}%</td><td class="num ${sgn(s.rs)}">${num(s.rs,1)}</td><td class="why">${esc(s.reason)}${s.research_note?'<br><b>Research:</b> '+esc(s.research_note):''}</td></tr>`).join('')||`<tr><td colspan="8" class="empty">No candidates for the next session.</td></tr>`;
  $('#scan').innerHTML=(p.scanned||[]).map(r=>`<tr><td><b>${esc(r.symbol)}</b></td><td class="num">${num(r.close)}</td><td class="num ${sgn(r.rs)}">${num(r.rs,1)}</td>
   <td>${r.signal?`<span class="chip good">${esc(r.setup)}</span>`:''}</td><td class="why">${esc(r.reason)}</td></tr>`).join('')||`<tr><td colspan="5" class="empty">No scan yet.</td></tr>`}
 function renderBanners(){const b=[...flash];if(S.mode==='live')b.push(['bad','LIVE MODE — real delivery orders are placed on your Zerodha account.']);
@@ -266,14 +268,17 @@ function renderBTStatus(){const b=S.backtest||{};$('#btRun').disabled=!!b.runnin
  if(b.running)$('#btStatus').textContent='Running: '+b.progress;else if(b.error)$('#btStatus').textContent=b.error;else if(fin)$('#btStatus').textContent='Finished '+ftime(b.finished);
  if(b.running)window._btWasRunning=true; else if(window._btWasRunning){window._btWasRunning=false;loadBacktest()}}
 let bsLoaded=false,bsDefaults=null;
-function bsFill(s){$('#bsCap').value=s.capital;$('#bsMode').value=s.holdings?'1':'0';$('#bsSlots').value=s.slots;$('#bsEntry').value=s.entry_mode||'cross';
+const TAGS=[['RESULTS','Results / news move'],['TURNAROUND','Turnaround'],['NEW_HIGH','52-week high'],['MOMENTUM','Established momentum'],['NONE','No clear reason']];
+$('#bsTags').innerHTML=TAGS.map(([k,l])=>`<label class="row" style="margin:0 12px 0 0;color:inherit"><input type="checkbox" data-tag="${k}" style="width:auto"> ${l}</label>`).join('');
+function bsFill(s){const a=(s.research_allow||'all').toUpperCase();document.querySelectorAll('#bsTags input').forEach(c=>c.checked=a==='ALL'||a.split(',').map(x=>x.trim()).includes(c.dataset.tag));$('#bsRank').value=s.research_rank||'rs';$('#bsCap').value=s.capital;$('#bsMode').value=s.holdings?'1':'0';$('#bsSlots').value=s.slots;$('#bsEntry').value=s.entry_mode||'cross';
  $('#bsDays').value=s.trend_max_days;$('#bsExt').value=s.trend_max_ext_pct;$('#bsMkt').value=s.market_check||'category';$('#bsHA').checked=!!s.market_ha_green;bsShow()}
 function bsShow(){const h=$('#bsMode').value==='1',t=$('#bsEntry').value!=='cross';
  document.querySelectorAll('.btset .hq').forEach(e=>e.hidden=!h);document.querySelectorAll('.btset .tq').forEach(e=>e.hidden=!t);$('#bsHA').disabled=$('#bsMkt').value==='off'}
 ['#bsMode','#bsEntry','#bsMkt'].forEach(s=>$(s).addEventListener('change',bsShow));
 $('#bsDefaults').onclick=e=>{e.preventDefault();if(bsDefaults)bsFill(bsDefaults)};
 const bsRead=()=>({capital:+$('#bsCap').value,holdings:$('#bsMode').value==='1',slots:+$('#bsSlots').value,entry_mode:$('#bsEntry').value,
- trend_max_days:+$('#bsDays').value,trend_max_ext_pct:+$('#bsExt').value,market_check:$('#bsMkt').value,market_ha_green:$('#bsHA').checked});
+ trend_max_days:+$('#bsDays').value,trend_max_ext_pct:+$('#bsExt').value,market_check:$('#bsMkt').value,market_ha_green:$('#bsHA').checked,research_rank:$('#bsRank').value,
+ research_allow:(()=>{const on=[...document.querySelectorAll('#bsTags input')].filter(c=>c.checked).map(c=>c.dataset.tag);return on.length===TAGS.length||!on.length?'all':on.join(',')})()});
 $('#btRun').onclick=async()=>{const r=await api('/api/backtest',{method:'POST',body:JSON.stringify({years:+$('#btYears').value,settings:bsRead()})});if(!r.ok){const j=await r.json();$('#btStatus').textContent=j.error}refresh()};
 function eqSVG(eq,start){if(!eq||eq.length<2)return'';const W=900,H=260,pad=40;let lo=Infinity,hi=-Infinity;
  for(const e of eq){lo=Math.min(lo,e.equity,e.benchmark);hi=Math.max(hi,e.equity,e.benchmark)}if(hi<=lo)hi=lo+1;
@@ -312,8 +317,10 @@ async function loadBacktest(){const j=await (await fetch('/api/backtest',{cache:
  ${(s.yearly||[]).length?`<h2 style="margin-top:14px">Year by year (each year starts from the previous year's final value)</h2><div class="tablewrap"><table><thead><tr><th>Year</th><th class="num">Start ₹</th><th class="num">End ₹</th><th class="num">Profit ₹</th><th class="num">Return</th><th class="num">NIFTY</th><th class="num">Trades closed</th></tr></thead><tbody>
  ${s.yearly.map(y=>`<tr><td>${y.year}</td><td class="num">${inr(y.start_equity)}</td><td class="num">${inr(y.end_equity)}</td><td class="num ${sgn(y.net)}">${inr(y.net)}</td><td class="num ${sgn(y.return_pct)}"><b>${num(y.return_pct,1)}%</b></td><td class="num ${sgn(y.benchmark_pct)}">${num(y.benchmark_pct,1)}%</td><td class="num">${y.trades}</td></tr>`).join('')}
  <tr><td><b>Total</b></td><td class="num">${inr(s.start_equity)}</td><td class="num">${inr(s.end_equity)}</td><td class="num ${sgn(s.end_equity-s.start_equity)}"><b>${inr(s.end_equity-s.start_equity)}</b></td><td class="num ${sgn(s.total_return_pct)}"><b>${num(s.total_return_pct,1)}%</b></td><td class="num">${num(s.benchmark_return_pct,1)}%</td><td class="num">${s.trades}</td></tr></tbody></table></div>`:''}
- <div class="tablewrap"><table><thead><tr><th>Symbol</th><th>Setup</th><th>Entry</th><th class="num">Price</th><th>Exit</th><th class="num">Price</th><th class="num">Net ₹</th><th class="num">R</th><th class="num">Days</th><th>Reason</th></tr></thead><tbody>
- ${tr.map(t=>`<tr><td><b>${esc(t.symbol)}</b></td><td>${esc(t.setup)}</td><td>${fdate(t.entry_date)} ${pd(t.entry_date).getFullYear()}</td><td class="num">${num(t.entry_price)}</td><td>${fdate(t.exit_date)}</td><td class="num">${num(t.exit_price)}</td><td class="num ${sgn(t.net)}">${num(t.net)}</td><td class="num ${sgn(t.r)}">${num(t.r)}</td><td class="num">${t.bars_held}</td><td class="why">${esc(t.reason)}</td></tr>`).join('')}
+ ${(s.by_research||[]).length?`<h2 style="margin-top:14px">Profit by research tag (why the stock was bought)</h2><div class="tablewrap"><table><thead><tr><th>Research</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">Net ₹</th><th class="num">Avg per trade ₹</th></tr></thead><tbody>
+ ${s.by_research.map(g=>`<tr><td>${esc((TAGS.find(t=>t[0]===g.key)||[g.key,g.key])[1])}</td><td class="num">${g.trades}</td><td class="num">${num(100*g.wins/g.trades,0)}%</td><td class="num ${sgn(g.net)}">${inr(g.net)}</td><td class="num ${sgn(g.net)}">${inr(g.net/g.trades)}</td></tr>`).join('')}</tbody></table></div>`:''}
+ <div class="tablewrap"><table><thead><tr><th>Symbol</th><th>Setup</th><th>Research</th><th>Entry</th><th class="num">Price</th><th>Exit</th><th class="num">Price</th><th class="num">Net ₹</th><th class="num">R</th><th class="num">Days</th><th>Reason</th></tr></thead><tbody>
+ ${tr.map(t=>`<tr><td><b>${esc(t.symbol)}</b></td><td>${esc(t.setup)}</td><td>${esc(t.research||'')}</td><td>${fdate(t.entry_date)} ${pd(t.entry_date).getFullYear()}</td><td class="num">${num(t.entry_price)}</td><td>${fdate(t.exit_date)}</td><td class="num">${num(t.exit_price)}</td><td class="num ${sgn(t.net)}">${num(t.net)}</td><td class="num ${sgn(t.r)}">${num(t.r)}</td><td class="num">${t.bars_held}</td><td class="why">${esc(t.reason)}</td></tr>`).join('')}
  </tbody></table></div>`}
 
 // Journal

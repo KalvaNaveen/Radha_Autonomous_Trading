@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -117,6 +118,13 @@ type StrategyConfig struct {
 	EntryMode      string  `yaml:"entry_mode"`        // cross | trend | both
 	TrendMaxDays   int     `yaml:"trend_max_days"`    // 15
 	TrendMaxExtPct float64 `yaml:"trend_max_ext_pct"` // 8
+
+	// Research tags — why a stock came up in the scan (RESULTS, TURNAROUND,
+	// NEW_HIGH, MOMENTUM, NONE). research_allow limits entries to stocks
+	// with one of the listed tags ("all" = no filter); research_rank
+	// "research" ranks candidates by tag strength before relative strength.
+	ResearchAllow string `yaml:"research_allow"` // all | comma list, e.g. RESULTS,NEW_HIGH
+	ResearchRank  string `yaml:"research_rank"`  // rs | research
 
 	// Heikin-Ashi filters (signals only — orders, stops and sizing use real prices).
 	HAEntry      string  `yaml:"ha_entry"`       // off | green | strong (green with no lower wick)
@@ -267,7 +275,7 @@ func Defaults() Config {
 			ExitOnEMACross: true, StopMode: "atr", FixedStop: true,
 			SwingLowBars: 10, BreakevenAtR: 1.5, TrailMode: "off", TrailStartR: 2, TargetR: 0, PartialPct: 100,
 			HAEntry: "green", HAExit: "off", HAExitBars: 2, HAWickPct: 10,
-			EntryMode: "cross", TrendMaxDays: 15, TrendMaxExtPct: 8,
+			EntryMode: "cross", TrendMaxDays: 15, TrendMaxExtPct: 8, ResearchAllow: "all", ResearchRank: "rs",
 		},
 		Risk: RiskConfig{Capital: 100000, RiskPerTradePct: 1.0, MaxPositionPct: 20, MaxPositions: 5,
 			MaxNewPerDay: 2, DrawdownPausePct: 15, DrawdownPauseDays: 20},
@@ -279,7 +287,7 @@ func Defaults() Config {
 			EntryLimitBufferPct: 0.5, GTTLimitBufferPct: 1.0, FillTimeout: 20 * time.Second, EntryMaxAge: 2 * time.Minute},
 		Market:   MarketConfig{Index: "NIFTY 50", RegimeFilter: true},
 		Backtest: BacktestConfig{Years: 5, Capital: 500000},
-		Holdings: HoldingsConfig{Enabled: false, Slots: 5, MarketCheck: "category", MarketHAGreen: true,
+		Holdings: HoldingsConfig{Enabled: false, Slots: 5, MarketCheck: "off", MarketHAGreen: true,
 			MidcapIndex: "NIFTY MIDCAP 150", SmallcapIndex: "NIFTY SMLCAP 250", CapsFile: "caps.csv"},
 		Server:   ServerConfig{Listen: "127.0.0.1:8080", PublicURL: "http://127.0.0.1:8080"},
 	}
@@ -367,6 +375,16 @@ func (c Config) Validate() error {
 	if s.EntryMode == "trend" || s.EntryMode == "both" {
 		if s.TrendMaxDays < 1 || s.TrendMaxExtPct <= 0 {
 			add("strategy: trend_max_days must be >= 1 and trend_max_ext_pct > 0")
+		}
+	}
+	if !oneOf(s.ResearchRank, "", "rs", "research") {
+		add("strategy.research_rank must be rs or research, got %q", s.ResearchRank)
+	}
+	if a := strings.TrimSpace(s.ResearchAllow); a != "" && !strings.EqualFold(a, "all") {
+		for _, t := range strings.Split(a, ",") {
+			if !oneOf(strings.ToUpper(strings.TrimSpace(t)), "RESULTS", "TURNAROUND", "NEW_HIGH", "MOMENTUM", "NONE") {
+				add("strategy.research_allow: unknown tag %q (use RESULTS, TURNAROUND, NEW_HIGH, MOMENTUM, NONE or all)", t)
+			}
 		}
 	}
 	if h := c.Holdings; h.Enabled {

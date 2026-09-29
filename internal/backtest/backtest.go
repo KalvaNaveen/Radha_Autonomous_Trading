@@ -88,6 +88,15 @@ type Summary struct {
 	NetProfit         float64 `json:"net_profit"`       // end − start equity, ₹
 	AvgInvestedPct    float64 `json:"avg_invested_pct"` // average share of equity in stocks (the rest is idle cash)
 	Yearly            []Year  `json:"yearly"`           // calendar-year returns (compounded into the total)
+	ByResearch        []Group `json:"by_research"`      // results per research tag at entry
+}
+
+// Group is the trade statistics of one research tag.
+type Group struct {
+	Key    string  `json:"key"`
+	Trades int     `json:"trades"`
+	Wins   int     `json:"wins"`
+	Net    float64 `json:"net"`
 }
 
 // Year is one calendar year of the equity curve.
@@ -192,6 +201,12 @@ func DescribeRules(c config.Config) string {
 	}
 	if len(exits) > 0 {
 		parts = append(parts, "exit "+strings.Join(exits, ", "))
+	}
+	if s.ResearchAllow != "" && !strings.EqualFold(s.ResearchAllow, "all") {
+		parts = append(parts, "research only "+s.ResearchAllow)
+	}
+	if s.ResearchRank == "research" {
+		parts = append(parts, "ranked by research tag")
 	}
 	if h := c.Holdings; h.Enabled {
 		mc := "no market check"
@@ -422,7 +437,7 @@ func Run(in Input) Result {
 			}
 			positions[sig.Symbol] = &models.Position{InstrumentToken: x.Token, Symbol: x.Symbol, Quantity: qty,
 				EntryPrice: fill, EntryDate: d, Setup: sig.Setup, InitialStop: sig.Stop, Stop: sig.Stop,
-				Stage: models.StageInitial, HighestClose: fill, EntryCosts: bc}
+				Stage: models.StageInitial, HighestClose: fill, EntryCosts: bc, Research: sig.Research}
 			newToday++
 		}
 		pending = nil
@@ -538,14 +553,7 @@ func Run(in Input) Result {
 				}
 				pending = append(pending, sig)
 			}
-			// Fresh crosses first, then stocks already in trend; strongest first.
-			sort.SliceStable(pending, func(a, b int) bool {
-				fa, fb := pending[a].Setup != models.SetupTrend, pending[b].Setup != models.SetupTrend
-				if fa != fb {
-					return fa
-				}
-				return pending[a].Score > pending[b].Score
-			})
+			swing.SortSignals(pending, cfg.Strategy)
 		}
 	}
 
@@ -674,6 +682,28 @@ func summarise(r Result, cfg config.Config, exposed, days, symbols int) Summary 
 	}
 	s.AvgInvestedPct = inv / float64(len(r.Equity)) * 100
 	s.Yearly = yearly(r, s.StartEquity)
+	by := map[string]*Group{}
+	for _, t := range r.Trades {
+		k := t.Research
+		if k == "" {
+			k = "—"
+		}
+		g := by[k]
+		if g == nil {
+			g = &Group{Key: k}
+			by[k] = g
+		}
+		g.Trades++
+		g.Net += t.Net
+		if t.Net > 0 {
+			g.Wins++
+		}
+	}
+	for _, k := range append(append([]string{}, swing.ResearchTags...), "—") {
+		if g := by[k]; g != nil {
+			s.ByResearch = append(s.ByResearch, *g)
+		}
+	}
 	return s
 }
 

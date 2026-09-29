@@ -38,6 +38,7 @@ func main() {
 	capsPath := flag.String("caps", "caps.csv", "market-cap categories for the holdings market check")
 	capital := flag.Float64("capital", 0, "starting capital (0: backtest.capital from the config)")
 	outDir := flag.String("out", "", "holdings grid: write the full report of the -detail variant here")
+	csvOut := flag.String("csv", "", "full grid: write every combination's results to this CSV file")
 	flag.Parse()
 
 	cfg := config.Defaults()
@@ -50,7 +51,7 @@ func main() {
 	if *capital > 0 {
 		cfg.Backtest.Capital = *capital
 	}
-	if *grid == "holdings" { // the backtester's capital (the other grids keep risk.capital for comparability)
+	if *grid == "holdings" || *grid == "full" || *grid == "edge" { // the backtester's capital (the other grids keep risk.capital for comparability)
 		cfg = cfg.ForBacktest()
 	}
 	syms := map[string]string{}
@@ -249,6 +250,15 @@ func main() {
 		add("3 + exit 3 red HA (any time)", func(s *config.StrategyConfig) { s.HAExit, s.HAExitBars, s.HAExitAlways = "red", 3, true })
 		add("1+3 HA green entry + 3 red exit", func(s *config.StrategyConfig) { s.HAEntry, s.HAExit, s.HAExitBars = "green", "red", 3 })
 		add("2+3 HA EMA/ST + 3 red exit", func(s *config.StrategyConfig) { s.CrossSource, s.HAExit, s.HAExitBars = "ha", "red", 3 })
+	}
+	if *grid == "edge" { // extend the full grid past its edges around the leaders
+		gSlots, gEntry, gDays, gExt = []int{2, 3, 4, 5}, []string{"both", "trend"}, []int{30, 45, 60}, []float64{12, 15, 20}
+		gResearch, gStop = []string{"all", "RESULTS,TURNAROUND,NEW_HIGH,MOMENTUM"}, []float64{3, 4, 5}
+		*grid = "full"
+	}
+	if *grid == "full" {
+		fullGrid(in, cfg, from, mid, to, *csvOut)
+		return
 	}
 	if *grid == "holdings" {
 		type hv struct {

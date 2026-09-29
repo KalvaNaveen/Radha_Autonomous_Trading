@@ -78,6 +78,8 @@ type BacktestSettings struct {
 	TrendMaxExtPct float64 `json:"trend_max_ext_pct"` // …and close at most this % above EMA20
 	MarketCheck    string  `json:"market_check"`      // off | nifty | category
 	MarketHAGreen  bool    `json:"market_ha_green"`   // the index's Heikin-Ashi candle must be green
+	ResearchAllow  string  `json:"research_allow"`    // all | comma list of research tags
+	ResearchRank   string  `json:"research_rank"`     // rs | research
 }
 
 func (e *Engine) btSettingsPath() string {
@@ -89,7 +91,8 @@ func (e *Engine) DefaultBacktestSettings() BacktestSettings {
 	c := e.cfg.ForBacktest()
 	return BacktestSettings{Capital: c.Risk.Capital, Holdings: c.Holdings.Enabled, Slots: c.SlotCount(),
 		EntryMode: orDefault(c.Strategy.EntryMode, "cross"), TrendMaxDays: c.Strategy.TrendMaxDays, TrendMaxExtPct: c.Strategy.TrendMaxExtPct,
-		MarketCheck: orDefault(c.Holdings.MarketCheck, "category"), MarketHAGreen: c.Holdings.MarketHAGreen}
+		MarketCheck: orDefault(c.Holdings.MarketCheck, "off"), MarketHAGreen: c.Holdings.MarketHAGreen,
+		ResearchAllow: orDefault(c.Strategy.ResearchAllow, "all"), ResearchRank: orDefault(c.Strategy.ResearchRank, "rs")}
 }
 
 func orDefault(v, d string) string {
@@ -129,6 +132,7 @@ func (e *Engine) backtestConfig(s BacktestSettings) (config.Config, error) {
 	c.Risk.Capital = s.Capital
 	c.Holdings.Enabled, c.Holdings.Slots, c.Holdings.MarketCheck, c.Holdings.MarketHAGreen = s.Holdings, s.Slots, s.MarketCheck, s.MarketHAGreen
 	c.Strategy.EntryMode, c.Strategy.TrendMaxDays, c.Strategy.TrendMaxExtPct = s.EntryMode, s.TrendMaxDays, s.TrendMaxExtPct
+	c.Strategy.ResearchAllow, c.Strategy.ResearchRank = orDefault(s.ResearchAllow, "all"), orDefault(s.ResearchRank, "rs")
 	if err := c.Validate(); err != nil {
 		return c, err
 	}

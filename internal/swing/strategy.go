@@ -7,6 +7,7 @@ package swing
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/nkalva/kitealgo/internal/config"
@@ -29,6 +30,7 @@ type Series struct {
 	HAClose   []float64
 	CrossFast []float64 // EMA(ema_cross_fast), e.g. EMA10
 	CrossSlow []float64 // EMA(ema_cross_slow), e.g. EMA20
+	EMA200    []float64 // long-term trend (research tags)
 	STDir     []int8    // Supertrend direction: +1 green, −1 red
 	STLine    []float64 // Supertrend line
 	byDate    map[string]int
@@ -45,6 +47,7 @@ func NewSeries(bars []models.Bar, p config.StrategyConfig) *Series {
 	}
 	s.EMAFast = indicators.EMA(s.Close, p.EMAFast)
 	s.EMASlow = indicators.EMA(s.Close, p.EMASlow)
+	s.EMA200 = indicators.EMA(s.Close, 200)
 	s.ATR = indicators.ATR(h, l, s.Close, p.ATRPeriod)
 	s.VolAvg = indicators.SMA(v, p.VolumeAvgPeriod)
 	s.PriorHigh = indicators.PriorHighest(h, p.BreakoutLookback)
@@ -269,8 +272,13 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 		stop = st.clampStop(c, lo*0.995) // just below the recent swing low
 	}
 	rs := st.RelativeStrength(s, i, idx, j)
+	tag, notes := Research(s, i, rs)
+	if !researchAllowed(p.ResearchAllow, notes) {
+		return models.Signal{}, false, fmt.Sprintf("%s setup, but research %s is not in research_allow (%s) — %s", kind, tag, p.ResearchAllow, strings.Join(notes, "; "))
+	}
+	why += " · research " + tag
 	return models.Signal{InstrumentToken: token, Symbol: sym, Date: b.Date, Setup: kind, Close: c, Stop: stop,
-		ATR: atr, RS: rs, Score: rs, Reason: why}, true, why
+		ATR: atr, RS: rs, Score: rs, Reason: why, Research: tag, ResearchNote: strings.Join(notes, "; ")}, true, why
 }
 
 // InitialStop is entry − stop_atr_mult × ATR, clamped to [min_stop_pct, max_stop_pct].

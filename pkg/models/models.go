@@ -266,6 +266,7 @@ type Position struct {
 	LastPrice       float64   `json:"last_price"`
 	EntryCosts      float64   `json:"entry_costs"`
 	PartialDone     bool      `json:"partial_done,omitempty"` // part of the position already booked at the target
+	Research        string    `json:"research,omitempty"`     // why the stock came up in the scan (research tag)
 }
 
 // RiskPerShare is 1R.
@@ -283,6 +284,8 @@ type Signal struct {
 	RS              float64   `json:"rs"` // relative strength vs the index, % points
 	Score           float64   `json:"score"`
 	Reason          string    `json:"reason"`
+	Research        string    `json:"research,omitempty"`      // primary research tag (RESULTS, TURNAROUND, NEW_HIGH, MOMENTUM, NONE)
+	ResearchNote    string    `json:"research_note,omitempty"` // the evidence behind every tag found
 }
 
 // Trade is one completed round trip.
@@ -301,4 +304,5 @@ type Trade struct {
 	BarsHeld   int       `json:"bars_held"`
 	Stage      StopStage `json:"stage"`
 	Reason     string    `json:"reason"`
+	Research   string    `json:"research,omitempty"` // research tag at entry
 }

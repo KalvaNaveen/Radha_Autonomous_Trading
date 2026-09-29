@@ -41,6 +41,11 @@ strategy:             # daily candles
   entry_mode: cross              # cross: only on the day the EMA cross turns · trend: also stocks already in that uptrend · both: fresh crosses first
   trend_max_days: 15             # trend/both: the cross is at most 15 sessions old…
   trend_max_ext_pct: 8           # …and the close at most 8% above EMA20 (not stretched)
+  # Research tags — why a stock came up in the scan, from its own price and volume:
+  #   RESULTS (gap/jump on heavy volume in the last 10 days) · TURNAROUND (fell ≥30%, back above its 200-day average)
+  #   NEW_HIGH (within 3% of its 52-week high) · MOMENTUM (established uptrend, beating NIFTY) · NONE
+  research_allow: all            # all | only these tags, e.g. RESULTS,NEW_HIGH
+  research_rank: rs              # rs: relative strength · research: stronger tag first, then relative strength
   ema_fast: 20                   # used by breakout/pullback and the trend filter
   ema_slow: 50
   atr_period: 14
@@ -139,7 +144,7 @@ backtest:
 holdings:
   enabled: false
   slots: 5                       # stocks held at once; capital split equally, empty slots refilled every morning
-  market_check: category         # off | nifty (NIFTY 50 for every stock) | category (the stock's own index, from caps_file)
+  market_check: off              # off (no index gate) | nifty (NIFTY 50 for every stock) | category (the stock's own index, from caps_file)
   market_ha_green: true          # the index's Heikin-Ashi candle must also be green
   midcap_index: "NIFTY MIDCAP 150"
   smallcap_index: "NIFTY SMLCAP 250"
