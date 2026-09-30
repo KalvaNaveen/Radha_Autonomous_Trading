@@ -98,30 +98,59 @@ type Pool struct {
 	Date     time.Time `json:"date"`
 	Eligible int       `json:"eligible"` // stocks passing price and liquidity that day
 	Symbols  []string  `json:"symbols"`
+
+	caps map[string]string // size category of every stock trading that day
 }
 
 // pickPool ranks every stock with a bar on d that passes min_price and
 // min_turnover_cr by its return over lookback sessions, using only data up
 // to d, and keeps the top n.
-func pickPool(insts []*inst, d time.Time, p config.StrategyConfig, n, lookback int) Pool {
+//
+// It also sizes every stock that trades that day by its average traded
+// value (a stand-in for market cap, which the candles do not carry): the top
+// 100 count as large caps, the next 150 as mid caps and the rest as small
+// caps — the same cut-offs AMFI uses on market cap.
+func pickPool(insts []*inst, k int, d time.Time, p config.StrategyConfig, n, lookback int) Pool {
 	type cand struct {
-		sym string
-		ret float64
+		sym      string
+		ret, val float64
+		ok       bool
 	}
-	var cs []cand
+	var all []cand
 	for _, x := range insts {
-		i, ok := x.s.IndexOn(d)
-		if !ok || i < lookback || x.s.Close[i-lookback] <= 0 {
+		i, ok := x.bar(k)
+		if !ok {
 			continue
 		}
 		c := x.s.Close[i]
-		if c < p.MinPrice || c*x.s.VolAvg[i] < p.MinTurnoverCr*1e7 {
-			continue
+		v := c * x.s.VolAvg[i]
+		ok = i >= lookback && x.s.Close[i-lookback] > 0 && c >= p.MinPrice && v >= p.MinTurnoverCr*1e7
+		r := 0.0
+		if ok {
+			r = c/x.s.Close[i-lookback] - 1
 		}
-		cs = append(cs, cand{x.Symbol, c/x.s.Close[i-lookback] - 1})
+		all = append(all, cand{x.Symbol, r, v, ok})
 	}
-	sort.Slice(cs, func(a, b int) bool { return cs[a].ret > cs[b].ret })
-	pl := Pool{Date: d, Eligible: len(cs)}
+	caps := make(map[string]string, len(all))
+	sort.Slice(all, func(a, b int) bool { return all[a].val > all[b].val })
+	for r, c := range all {
+		switch {
+		case r < 100:
+			caps[c.sym] = data.CapLarge
+		case r < 250:
+			caps[c.sym] = data.CapMid
+		default:
+			caps[c.sym] = data.CapSmall
+		}
+	}
+	var cs []cand
+	for _, c := range all {
+		if c.ok {
+			cs = append(cs, c)
+		}
+	}
+	sort.SliceStable(cs, func(a, b int) bool { return cs[a].ret > cs[b].ret })
+	pl := Pool{Date: d, Eligible: len(cs), caps: caps}
 	for k := 0; k < n && k < len(cs); k++ {
 		pl.Symbols = append(pl.Symbols, cs[k].sym)
 	}
@@ -297,7 +326,16 @@ func DescribeRules(c config.Config) string {
 
 type inst struct {
 	Instrument
-	s *swing.Series
+	s  *swing.Series
+	at []int32 // bar index for each index (calendar) day, −1 if the stock has no bar that day
+}
+
+// bar returns the stock's bar index on index day k.
+func (x *inst) bar(k int) (int, bool) {
+	if k < 0 || k >= len(x.at) || x.at[k] < 0 {
+		return 0, false
+	}
+	return int(x.at[k]), true
 }
 
 // Prepared holds the indicator series of a run's instruments. Studies that
@@ -314,6 +352,10 @@ type Prepared struct {
 func Prepare(in Input) *Prepared {
 	cfg := in.Config
 	p := &Prepared{idx: swing.NewSeries(in.Index, cfg.Strategy)}
+	day := make(map[string]int, len(in.Index))
+	for k, b := range in.Index {
+		day[swing.DateKey(b.Date)] = k
+	}
 	for _, ins := range in.Instruments {
 		if len(ins.Bars) == 0 {
 			continue
@@ -321,7 +363,16 @@ func Prepare(in Input) *Prepared {
 		if cfg.Backtest.AutoUniverse.Enabled && !everLiquid(ins.Bars, cfg.Strategy, in.From) {
 			continue // never tradable in the window: skip the indicator work (thousands of small caps)
 		}
-		p.insts = append(p.insts, &inst{Instrument: ins, s: swing.NewSeries(ins.Bars, cfg.Strategy)})
+		x := &inst{Instrument: ins, s: swing.NewSeries(ins.Bars, cfg.Strategy), at: make([]int32, len(in.Index))}
+		for k := range x.at {
+			x.at[k] = -1
+		}
+		for i, b := range ins.Bars {
+			if k, ok := day[swing.DateKey(b.Date)]; ok {
+				x.at[k] = int32(i)
+			}
+		}
+		p.insts = append(p.insts, x)
 	}
 	return p
 }
@@ -364,22 +415,33 @@ func Run(in Input) Result {
 			}
 		}
 	}
+	var autoCaps map[string]string // auto universe: size by traded value, re-ranked monthly
 	capOf := func(sym string) string {
-		if c, ok := in.Caps[sym]; ok {
+		if c, ok := in.Caps[sym]; ok { // caps.csv wins
+			return c
+		}
+		if c, ok := autoCaps[sym]; ok {
 			return c
 		}
 		return data.CapLarge
 	}
-	marketOK := func(ser *swing.Series, d time.Time) bool {
-		j, ok := ser.IndexOn(d)
-		if !ok {
-			return false
+	// marketOn[category][k]: may new longs be bought on index day k?
+	marketOn := map[string][]bool{}
+	if hold && mc != "off" && mc != "" {
+		for c, ser := range market {
+			on := make([]bool, len(in.Index))
+			for k, b := range in.Index {
+				if j, ok := ser.IndexOn(b.Date); ok {
+					on[k] = st.RegimeOK(ser, j) && (!cfg.Holdings.MarketHAGreen || ser.HAGreen(j))
+				}
+			}
+			marketOn[c] = on
 		}
-		return st.RegimeOK(ser, j) && (!cfg.Holdings.MarketHAGreen || ser.HAGreen(j))
 	}
 
 	auto := cfg.Backtest.AutoUniverse
 	var pool map[string]bool // nil: scan every instrument
+	scan := insts           // the instruments scanned this month (insts order)
 	poolMonth := -1
 
 	cash := cfg.Risk.Capital
@@ -464,7 +526,7 @@ func Run(in Input) Result {
 				continue
 			}
 			x := find(p.Symbol)
-			if i, ok := x.s.IndexOn(d); ok {
+			if i, ok := x.bar(k); ok {
 				sell(p, x.s.Bars[i].Open*(1-slip), d, p.PendingExit, k)
 			}
 		}
@@ -479,7 +541,7 @@ func Run(in Input) Result {
 				continue
 			}
 			x := find(sig.Symbol)
-			i, ok := x.s.IndexOn(d)
+			i, ok := x.bar(k)
 			if !ok {
 				res.Skipped["no bar next day"]++
 				continue
@@ -542,7 +604,7 @@ func Run(in Input) Result {
 		// 2. INTRADAY — stops.
 		for _, p := range sortedPositions(positions) {
 			x := find(p.Symbol)
-			i, ok := x.s.IndexOn(d)
+			i, ok := x.bar(k)
 			if !ok {
 				continue
 			}
@@ -589,7 +651,7 @@ func Run(in Input) Result {
 		// 3. CLOSE — manage, mark, scan.
 		for _, p := range sortedPositions(positions) {
 			x := find(p.Symbol)
-			i, ok := x.s.IndexOn(d)
+			i, ok := x.bar(k)
 			if !ok {
 				continue
 			}
@@ -608,7 +670,7 @@ func Run(in Input) Result {
 		res.Equity = append(res.Equity, EquityPoint{Date: d, Equity: equity, Cash: cash, Positions: len(positions),
 			Benchmark: cfg.Risk.Capital * ib.Close / benchBase})
 
-		j, _ := idx.IndexOn(d)
+		j := k // the index series is the calendar
 		regime := !cfg.Market.RegimeFilter || st.RegimeOK(idx, j)
 		if hold { // the market check is per stock (below)
 			regime = true
@@ -626,22 +688,28 @@ func Run(in Input) Result {
 			}
 		}
 		if auto.Enabled && int(d.Month()) != poolMonth { // first session of the month: re-pick the stocks to scan
-			pl := pickPool(insts, d, cfg.Strategy, auto.TopN, auto.LookbackDays)
-			pool, poolMonth = map[string]bool{}, int(d.Month())
+			pl := pickPool(insts, k, d, cfg.Strategy, auto.TopN, auto.LookbackDays)
+			pool, poolMonth, autoCaps = map[string]bool{}, int(d.Month()), pl.caps
 			for _, s := range pl.Symbols {
 				pool[s] = true
+			}
+			scan = scan[:0:0]
+			for _, x := range insts {
+				if pool[x.Symbol] {
+					scan = append(scan, x)
+				}
 			}
 			res.Pools = append(res.Pools, pl)
 		}
 		if regime && !paused {
-			for _, x := range insts {
+			for _, x := range scan {
 				if _, held := positions[x.Symbol]; held || cooldown[x.Symbol] > k {
 					continue
 				}
 				if pool != nil && !pool[x.Symbol] {
 					continue
 				}
-				i, ok := x.s.IndexOn(d)
+				i, ok := x.bar(k)
 				if !ok {
 					continue
 				}
@@ -654,7 +722,7 @@ func Run(in Input) Result {
 					if mc == "category" {
 						c = capOf(x.Symbol)
 					}
-					if !marketOK(market[c], d) {
+					if !marketOn[c][k] {
 						res.Skipped["market check: "+marketName[c]+" weak"]++
 						continue
 					}

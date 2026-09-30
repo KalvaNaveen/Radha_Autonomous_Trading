@@ -108,6 +108,25 @@ func Research(s *Series, i int, rs float64) (string, []string) {
 	return tags[0], notes
 }
 
+type researchHit struct {
+	rs    float64
+	tag   string
+	notes []string
+}
+
+// researchAt is Research with a per-bar cache (valid while the relative
+// strength passed in is the same, i.e. against the same index).
+func (s *Series) researchAt(i int, rs float64) (string, []string) {
+	if v, ok := s.research.Load(i); ok {
+		if h := v.(researchHit); h.rs == rs {
+			return h.tag, h.notes
+		}
+	}
+	tag, notes := Research(s, i, rs)
+	s.research.Store(i, researchHit{rs, tag, notes})
+	return tag, notes
+}
+
 // researchAllowed reports whether any of the stock's tags is in the allowed
 // list ("" or "all" allows everything). The primary tag is the strongest,
 // but a stock tagged RESULTS and NEW_HIGH passes a NEW_HIGH-only filter too.

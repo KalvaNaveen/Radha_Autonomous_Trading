@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nkalva/kitealgo/internal/config"
@@ -31,6 +32,7 @@ type Series struct {
 	CrossFast []float64 // EMA(ema_cross_fast), e.g. EMA10
 	CrossSlow []float64 // EMA(ema_cross_slow), e.g. EMA20
 	EMA200    []float64 // long-term trend (research tags)
+	research  sync.Map  // bar → researchHit: tags depend only on the bars (and RS vs the same index), so studies share them
 	STDir     []int8    // Supertrend direction: +1 green, −1 red
 	STLine    []float64 // Supertrend line
 	byDate    map[string]int
@@ -272,7 +274,7 @@ func (st *Strategy) Evaluate(sym string, token uint32, s *Series, i int, idx *Se
 		stop = st.clampStop(c, lo*0.995) // just below the recent swing low
 	}
 	rs := st.RelativeStrength(s, i, idx, j)
-	tag, notes := Research(s, i, rs)
+	tag, notes := s.researchAt(i, rs)
 	if !researchAllowed(p.ResearchAllow, notes) {
 		return models.Signal{}, false, fmt.Sprintf("%s setup, but research %s is not in research_allow (%s) — %s", kind, tag, p.ResearchAllow, strings.Join(notes, "; "))
 	}

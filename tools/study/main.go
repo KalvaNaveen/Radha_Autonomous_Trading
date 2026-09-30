@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,7 +42,19 @@ func main() {
 	csvOut := flag.String("csv", "", "full grid: write every combination's results to this CSV file")
 	autoN := flag.Int("auto", 0, "auto universe: scan only the N strongest stocks each month (0 = off)")
 	autoLook := flag.Int("auto-lookback", 120, "auto universe: strength window in sessions")
+	cpuProf := flag.String("cpuprofile", "", "write a CPU profile here")
+	repeat := flag.Int("repeat", 1, "settings grid: run it this many times (profiling)")
+	sample := flag.Int("sample", 1, "every grids: run only every N-th combination (smoke test)")
+	marketOverride := flag.String("market", "", "settings grid: override the market check (off | nifty | category)")
 	flag.Parse()
+	if *cpuProf != "" {
+		f, err := os.Create(*cpuProf)
+		if err != nil {
+			fail(err)
+		}
+		_ = pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 
 	cfg := config.Defaults()
 	if *cfgPath != "" {
@@ -56,7 +69,7 @@ func main() {
 	if *autoN > 0 { // rule-based stock list: each month the N strongest of every cached stock
 		cfg.Backtest.AutoUniverse = config.AutoUniverseConfig{Enabled: true, Source: "all_nse", TopN: *autoN, LookbackDays: *autoLook}
 	}
-	if *grid == "holdings" || *grid == "full" || *grid == "edge" || *grid == "market" { // the backtester's capital (the other grids keep risk.capital for comparability)
+	if *grid == "holdings" || *grid == "full" || *grid == "edge" || *grid == "market" || *grid == "every" || *grid == "every-list" { // the backtester's capital (the other grids keep risk.capital for comparability)
 		cfg = cfg.ForBacktest()
 	}
 	syms := map[string]string{}
@@ -73,7 +86,7 @@ func main() {
 		fail(fmt.Errorf("no symbol map: pass -symbols or keep data/instruments"))
 	}
 	universe := map[string]bool{}
-	if *grid == "market" || *grid == "settings" { // the engine's all-NSE pool: ordinary shares only
+	if *grid == "market" || *grid == "settings" || *grid == "every" { // the engine's all-NSE pool: ordinary shares only
 		for _, x := range data.AllEquities(data.NewStore(filepath.Dir(*dir), nil, nil).LatestInstruments()) {
 			universe[x.TradingSymbol] = true
 		}
@@ -262,6 +275,15 @@ func main() {
 		add("1+3 HA green entry + 3 red exit", func(s *config.StrategyConfig) { s.HAEntry, s.HAExit, s.HAExitBars = "green", "red", 3 })
 		add("2+3 HA EMA/ST + 3 red exit", func(s *config.StrategyConfig) { s.CrossSource, s.HAExit, s.HAExitBars = "ha", "red", 3 })
 	}
+	if *grid == "every" || *grid == "every-list" { // every Backtest-tab combination, with each year's return
+		topNs, looks := []int{20, 50, 100}, []int{60, 120, 250}
+		if *grid == "every-list" {
+			topNs, looks = []int{0}, []int{0}
+		}
+		rep := strings.TrimSuffix(*csvOut, ".csv") + "-report.txt"
+		exhaustive(in, cfg, from, mid, to, *csvOut, rep, topNs, looks, *sample)
+		return
+	}
 	if *grid == "settings" { // one run with the control panel's saved backtest settings (parity check)
 		var s struct {
 			Capital                               float64
@@ -294,7 +316,17 @@ func main() {
 		c.Strategy.ResearchAllow, c.Strategy.ResearchRank = extra.ResearchAllow, extra.ResearchRank
 		c.Backtest.AutoUniverse = config.AutoUniverseConfig{Enabled: extra.Universe == "all_nse", Source: "all_nse", TopN: s.TopN, LookbackDays: s.Lookback}
 		in.From, in.To, in.Config = from, to, c
-		r := backtest.Run(in).Summary
+		if *marketOverride != "" {
+			c.Holdings.MarketCheck = *marketOverride
+			in.Config = c
+		}
+		in.Prepared = backtest.Prepare(in)
+		t0 := time.Now()
+		var r backtest.Summary
+		for k := 0; k < *repeat; k++ {
+			r = backtest.Run(in).Summary
+		}
+		fmt.Printf("%d run(s) in %s\n", *repeat, time.Since(t0).Round(time.Millisecond))
 		fmt.Printf("saved settings: ₹%.0f → ₹%.0f  %+.1f%%  CAGR %.2f%%  maxDD %.2f%%  trades %d  symbols %d\n", r.StartEquity, r.EndEquity, r.TotalReturnPct, r.CAGRPct, r.MaxDrawdownPct, r.Trades, r.Symbols)
 		return
 	}
