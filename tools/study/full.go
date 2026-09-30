@@ -179,17 +179,17 @@ func fullGrid(in backtest.Input, cfg config.Config, from, mid, to time.Time, csv
 	}
 	solid := func(c *combo) bool { return c.H1.TotalReturnPct > 0 && c.H2.TotalReturnPct > 0 && c.Full.Trades >= 40 }
 	raw := sorted(func(a, b *combo) bool { return a.Full.TotalReturnPct > b.Full.TotalReturnPct }, nil)
-	print("Highest 5-year return (raw — may be luck)", raw, 15)
+	print("Highest full-period return (raw — may be luck)", raw, 15)
 	both := sorted(func(a, b *combo) bool {
 		return math.Min(a.H1.TotalReturnPct, a.H2.TotalReturnPct) > math.Min(b.H1.TotalReturnPct, b.H2.TotalReturnPct)
 	}, solid)
-	print("Best worse-half (strong in BOTH 2021–24 and 2024–26)", both, 15)
+	print(fmt.Sprintf("Best worse-half (strong in BOTH %s→%s and %s→%s)", from.Format("2006-01"), mid.Format("2006-01"), mid.Format("2006-01"), to.Format("2006-01")), both, 15)
 	rob := sorted(func(a, b *combo) bool { return a.Robust > b.Robust }, solid)
 	print("Most robust (median CAGR of the combo and its neighbours; both halves positive, ≥40 trades)", rob, 15)
 
 	// Walk-forward: pick the best on the first half only, then see the second half.
 	wf := sorted(func(a, b *combo) bool { return a.H1.TotalReturnPct > b.H1.TotalReturnPct }, nil)
-	fmt.Printf("\n== Walk-forward: the 10 best on 2021–24 alone, and what they did in 2024–26 (unseen)\n")
+	fmt.Printf("\n== Walk-forward: the 10 best on %s→%s alone, and what they did in %s→%s (unseen)\n", from.Format("2006-01"), mid.Format("2006-01"), mid.Format("2006-01"), to.Format("2006-01"))
 	for k := 0; k < 10 && k < len(wf); k++ {
 		c := wf[k]
 		fmt.Printf("  %-70s H1 %7.1f%% → H2 %7.1f%%\n", c.label(), c.H1.TotalReturnPct, c.H2.TotalReturnPct)
